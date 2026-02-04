@@ -5,6 +5,10 @@ description = "ComfyUI Taylor attention custom node"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "comfy_kitchen",
+  "einops",
+  "psutil",
+  "pillow",
   "torch",
   "numpy",
 ]

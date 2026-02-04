@@ -12,6 +12,7 @@
 - Use Python logging liberally to insert judicious info, warning, and debug messages in the code.
 - Import logging into each module and set logger = logging.getLogger(__name__). Then use logger for logging in that module.
 - In most cases where an error message is called for, you should raise an appropriate exception. We want to know.
+- Use uv for package management.
 
 ## Testing instructions
 - Add or update tests for the code you change, even if nobody asked.
