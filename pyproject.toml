@@ -1,0 +1,17 @@
+[project]
+name = "sata-speedup"
+version = "0.1.0"
+description = "ComfyUI Taylor attention custom node"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"

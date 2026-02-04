@@ -32,6 +32,13 @@ pytest -q
 RUN_LONG_TESTS=1 pytest -q  # includes 1024/4096 token tests
 ```
 
+### Using uv
+
+```bash
+uv sync --extra test
+uv run pytest
+```
+
 ## Benchmarks
 
 Microbenchmark (resolution-dependent via token count):
