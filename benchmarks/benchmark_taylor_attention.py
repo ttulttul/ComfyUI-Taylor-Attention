@@ -1,7 +1,13 @@
 import argparse
+import os
+import sys
 import time
 
 import torch
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.append(REPO_ROOT)
 
 import taylor_attention
 
