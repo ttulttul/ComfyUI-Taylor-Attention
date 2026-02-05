@@ -893,6 +893,8 @@ def _taylor_attention_fused(
     transformer_options: Optional[dict],
     skip_quality_stats: bool,
     skip_step_log: bool,
+    skip_output_reshape: bool,
+    den_stats_out: Optional[Dict[str, float]] = None,
 ) -> torch.Tensor:
     if taylor_triton is None or not taylor_triton.is_available(q.device):
         logger.warning("Taylor fused kernel unavailable, falling back to torch ops.")
@@ -1035,6 +1037,8 @@ def _taylor_attention_fused(
     out = out / den[..., None]
 
     quality_stats = None if skip_quality_stats else _compute_quality_stats(cfg, q_orig, k_orig, v, out, key_mask_bool, scale_base)
+    if den_stats_out is not None:
+        _merge_den_stats(den_stats_out, den_stats)
     if step_stats is not None:
         step_stats["taylor_calls"] += 1
         _merge_den_stats(step_stats["den_stats"], den_stats)
@@ -1044,6 +1048,9 @@ def _taylor_attention_fused(
             _maybe_log_step_stats(transformer_options, cfg, step_stats)
 
     out = out.to(dtype=v_dtype)
+    if skip_output_reshape:
+        return out
+    out = out.permute(0, 2, 1, 3).reshape(batch, n_q, heads * dim_head)
     return out
 
 
@@ -1193,6 +1200,8 @@ def taylor_attention(
             transformer_options,
             skip_quality_stats,
             skip_step_log,
+            skip_output_reshape,
+            den_stats_out=den_stats_out,
         )
     block_k = max(1, cfg.block_size_k)
     block_q = max(1, cfg.block_size_q)
