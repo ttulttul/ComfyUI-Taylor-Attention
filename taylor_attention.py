@@ -373,6 +373,8 @@ def _get_step_stats(transformer_options: Optional[dict], cfg: TaylorAttentionCon
             "fallback_reasons": {},
             "den_stats": _init_den_stats(),
             "quality": _init_quality_stats(),
+            "quality_raw": None,
+            "quality_eff": None,
             "config": _config_summary(cfg),
         }
         transformer_options["taylor_step_stats"] = stats
@@ -467,11 +469,15 @@ def _maybe_log_step_stats(transformer_options: Optional[dict], cfg: TaylorAttent
             "q_norm_eff={q_norm_eff} k_norm_eff={k_norm_eff} qk_eff={qk_eff}]"
         ).format(**diag)
 
+    quality_raw = _format_quality(step_stats.get("quality_raw"))
+    quality_eff = _format_quality(step_stats.get("quality_eff"))
+
     logger.info(
         "Taylor step stats: sigma=%s calls=%s taylor=%s fallback=%s denom_fallback_frac=%.6g "
         "reasons=%s "
         "den[min=%.6g max=%.6g mean=%.6g frac_le_eps=%.6g] "
         "quality[mean_abs=%.6g max_abs=%.6g mean_rel=%.6g max_rel=%.6g samples=%s] "
+        "quality_raw[%s] quality_eff[%s] "
         "config[qk_normalize=%s qk_norm_power=%.3g qk_norm_clip=%.3g scale_mul=%.3g sub_head_blocks=%s max_head_dim=%s force_fp32=%s denom_fp32=%s probe_samples=%s denom_fallback_frac_limit=%.3g fused_kernel=%s fused_feature_chunk_size=%s fused_value_chunk_size=%s s_store_bf16=%s]%s",
         sigma,
         calls,
@@ -488,6 +494,8 @@ def _maybe_log_step_stats(transformer_options: Optional[dict], cfg: TaylorAttent
         q_mean_rel,
         q_max_rel,
         quality["samples"],
+        quality_raw,
+        quality_eff,
         cfg_summary["qk_normalize"],
         cfg_summary["qk_norm_power"],
         cfg_summary["qk_norm_clip"],
@@ -556,6 +564,32 @@ def _quality_check_should_log(cfg: TaylorAttentionConfig) -> bool:
     return (_QUALITY_CHECK_CALLS % cfg.quality_check_log_every) == 0
 
 
+def _apply_qk_norm(
+    cfg: TaylorAttentionConfig,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    dtype_accum: torch.dtype,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if not (cfg.qk_normalize or cfg.qk_norm_clip > 0 or cfg.qk_norm_power > 0):
+        return q, k
+    q_f = q.to(dtype=dtype_accum)
+    k_f = k.to(dtype=dtype_accum)
+    q_norm = torch.norm(q_f, dim=-1, keepdim=True) + cfg.eps
+    k_norm = torch.norm(k_f, dim=-1, keepdim=True) + cfg.eps
+    if cfg.qk_normalize:
+        return q_f / q_norm, k_f / k_norm
+
+    q_eff = q_f
+    k_eff = k_f
+    if cfg.qk_norm_power > 0:
+        q_eff = q_eff / (q_norm ** cfg.qk_norm_power)
+        k_eff = k_eff / (k_norm ** cfg.qk_norm_power)
+    if cfg.qk_norm_clip > 0:
+        q_eff = q_eff * torch.clamp(cfg.qk_norm_clip / q_norm, max=1.0)
+        k_eff = k_eff * torch.clamp(cfg.qk_norm_clip / k_norm, max=1.0)
+    return q_eff, k_eff
+
+
 def _compute_quality_stats(
     cfg: TaylorAttentionConfig,
     q: torch.Tensor,
@@ -594,6 +628,27 @@ def _compute_quality_stats(
         "max_rel": float(rel.max().item()),
         "samples": int(diff.numel()),
     }
+
+
+def _quality_stats_to_summary(stats: Optional[Dict[str, float]]) -> Optional[Dict[str, float]]:
+    if not stats or stats["samples"] <= 0:
+        return None
+    return {
+        "mean_abs": stats["sum_abs"] / stats["samples"],
+        "mean_rel": stats["sum_rel"] / stats["samples"],
+        "max_abs": stats["max_abs"],
+        "max_rel": stats["max_rel"],
+        "samples": stats["samples"],
+    }
+
+
+def _format_quality(stats: Optional[Dict[str, float]]) -> str:
+    if not stats:
+        return "n/a"
+    return (
+        "mean_abs={mean_abs:.6g} max_abs={max_abs:.6g} "
+        "mean_rel={mean_rel:.6g} max_rel={max_rel:.6g} samples={samples}"
+    ).format(**stats)
 
 
 
@@ -1072,13 +1127,16 @@ def _taylor_attention_fused(
         den = den.to(dtype_accum)
     out = out / den[..., None]
 
-    quality_stats = None if skip_quality_stats else _compute_quality_stats(cfg, q_orig, k_orig, v, out, key_mask_bool, scale_base)
+    quality_raw = None if skip_quality_stats else _compute_quality_stats(cfg, q_orig, k_orig, v, out, key_mask_bool, scale_base)
+    quality_eff = None if skip_quality_stats else _compute_quality_stats(cfg, q, k, v, out, key_mask_bool, scale)
     if den_stats_out is not None:
         _merge_den_stats(den_stats_out, den_stats)
     if step_stats is not None:
         step_stats["taylor_calls"] += 1
         _merge_den_stats(step_stats["den_stats"], den_stats)
-        _merge_quality_stats(step_stats["quality"], quality_stats)
+        _merge_quality_stats(step_stats["quality"], quality_raw)
+        step_stats["quality_raw"] = _quality_stats_to_summary(quality_raw)
+        step_stats["quality_eff"] = _quality_stats_to_summary(quality_eff)
         _maybe_add_diagnostics(step_stats, transformer_options, q_orig, k_orig, q, k, scale_base, scale)
         if not skip_step_log:
             _maybe_log_step_stats(transformer_options, cfg, step_stats)
@@ -1178,8 +1236,13 @@ def taylor_attention(
             )
         out = torch.cat(sub_outputs, dim=-1)
         if step_stats is not None:
-            quality_stats = _compute_quality_stats(cfg, q_orig, k_orig, v, out, key_mask_bool, scale_base)
-            _merge_quality_stats(step_stats["quality"], quality_stats)
+            q_eff, k_eff = _apply_qk_norm(cfg, q_orig, k_orig, dtype_accum=torch.float32)
+            quality_raw = _compute_quality_stats(cfg, q_orig, k_orig, v, out, key_mask_bool, scale_base)
+            quality_eff = _compute_quality_stats(cfg, q_eff, k_eff, v, out, key_mask_bool, scale)
+            _merge_quality_stats(step_stats["quality"], quality_raw)
+            step_stats["quality_raw"] = _quality_stats_to_summary(quality_raw)
+            step_stats["quality_eff"] = _quality_stats_to_summary(quality_eff)
+            _maybe_add_diagnostics(step_stats, transformer_options, q_orig, k_orig, q_eff, k_eff, scale_base, scale)
             _maybe_log_step_stats(transformer_options, cfg, step_stats)
         if skip_output_reshape:
             return out
@@ -1203,23 +1266,7 @@ def taylor_attention(
 
     dtype_accum = torch.float32 if cfg.force_fp32 else q.dtype
     v_dtype = v.dtype
-    if cfg.qk_normalize or cfg.qk_norm_clip > 0 or cfg.qk_norm_power > 0:
-        q_f = q.to(dtype=dtype_accum)
-        k_f = k.to(dtype=dtype_accum)
-        q_norm = torch.norm(q_f, dim=-1, keepdim=True) + cfg.eps
-        k_norm = torch.norm(k_f, dim=-1, keepdim=True) + cfg.eps
-        if cfg.qk_normalize:
-            q = q_f / q_norm
-            k = k_f / k_norm
-        else:
-            q = q_f
-            k = k_f
-            if cfg.qk_norm_power > 0:
-                q = q / (q_norm ** cfg.qk_norm_power)
-                k = k / (k_norm ** cfg.qk_norm_power)
-            if cfg.qk_norm_clip > 0:
-                q = q * torch.clamp(cfg.qk_norm_clip / q_norm, max=1.0)
-                k = k * torch.clamp(cfg.qk_norm_clip / k_norm, max=1.0)
+    q, k = _apply_qk_norm(cfg, q, k, dtype_accum)
 
     if cfg.fused_kernel and sub_head_blocks == 1:
         return _taylor_attention_fused(
