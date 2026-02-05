@@ -34,6 +34,8 @@ class TaylorAttentionConfig:
     allow_cross_attention: bool = True
     max_head_dim: int = 128
     sub_head_blocks: int = 4
+    qk_normalize: bool = False
+    scale_mul: float = 1.0
     force_fp32: bool = False
     memory_reserve: bool = True
     memory_reserve_factor: float = 1.1
@@ -502,11 +504,16 @@ def taylor_attention(
             )
         raise TaylorAttentionFallback("feature_dim_too_large")
 
-    scale = dim_head ** -0.5
+    scale = (dim_head ** -0.5) * cfg.scale_mul
     _log_shapes_once(cfg, transformer_options, q, k, v, mask, scale, skip_reshape)
 
     dtype_accum = torch.float32 if cfg.force_fp32 else q.dtype
     v_dtype = v.dtype
+    if cfg.qk_normalize:
+        q_f = q.to(dtype=dtype_accum)
+        k_f = k.to(dtype=dtype_accum)
+        q = q_f / (torch.norm(q_f, dim=-1, keepdim=True) + cfg.eps)
+        k = k_f / (torch.norm(k_f, dim=-1, keepdim=True) + cfg.eps)
     block_k = max(1, cfg.block_size_k)
     block_q = max(1, cfg.block_size_q)
 

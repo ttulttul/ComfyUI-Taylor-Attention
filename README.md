@@ -20,6 +20,8 @@ designed for large token counts where quadratic attention becomes expensive.
   - `min_tokens`: only use Taylor when tokens >= this threshold (default 100).
   - `max_feature_dim_R`: safety cap for feature dimension (default 370000).
   - `sub_head_blocks`: split each head into smaller blocks to reduce feature expansion (default 4).
+  - `qk_normalize`: L2-normalize queries/keys before Taylor features (default false).
+  - `scale_mul`: additional scale multiplier for q·k before Taylor (default 1.0).
   - `block_size_q` / `block_size_k`: block sizes for memory control (defaults 32 / 16).
   - `fallback_on_negative`: fallback to standard attention if denominators are too small.
   - `force_fp32`: accumulate Taylor features in fp32 for stability (default false).

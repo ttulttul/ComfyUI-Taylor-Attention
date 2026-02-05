@@ -7,3 +7,4 @@
 - Sub-head block Taylor splits each head into smaller blocks to reduce feature dimension while keeping P fixed.
 - Defaults now target diffusion-scale workloads (low min_tokens, sub-head blocks, and tighter block sizes).
 - Denominator stats are now logged on every Taylor call for stability debugging.
+- Added qk_normalize and scale_mul knobs to stabilize P=4 Taylor attention by shrinking q·k values.
