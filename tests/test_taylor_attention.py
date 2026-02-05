@@ -288,6 +288,13 @@ def test_qk_norm_sigma_max_config_respected():
     assert cfg.qk_norm_sigma_max == 0.75
 
 
+def test_taylor_gate_config_respected():
+    cfg = taylor_attention._resolve_config({"enabled": True, "taylor_sigma_max": 1.2, "taylor_layer_start": 2, "taylor_layer_end": 4})
+    assert cfg.taylor_sigma_max == 1.2
+    assert cfg.taylor_layer_start == 2
+    assert cfg.taylor_layer_end == 4
+
+
 def test_qk_norm_clip_power_runs():
     device = torch.device("cpu")
     batch = 1

@@ -39,6 +39,8 @@ designed for large token counts where quadratic attention becomes expensive.
   - `fused_feature_chunk_size`: number of Taylor features processed per chunk when fused (default 8192).
   - `fused_value_chunk_size`: value dimension chunking for fused path (0 = full).
   - `s_store_bf16`: store S chunks in bf16 to reduce memory (may reduce accuracy).
+  - `taylor_sigma_max`: only run Taylor when sigma <= this value (0 disables).
+  - `taylor_layer_start` / `taylor_layer_end`: only run Taylor when block_index is within this inclusive range (-1 disables each bound).
   - `auto_tune`: stochastic search for q/k scaling during early steps.
   - `auto_tune_steps`: number of steps to search (default 1).
   - `auto_tune_candidates`: candidates per step (default 8).

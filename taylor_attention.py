@@ -56,6 +56,9 @@ class TaylorAttentionConfig:
     fused_feature_chunk_size: int = 8192
     fused_value_chunk_size: int = 0
     s_store_bf16: bool = False
+    taylor_sigma_max: float = 0.0
+    taylor_layer_start: int = -1
+    taylor_layer_end: int = -1
     auto_tune: bool = False
     auto_tune_steps: int = 1
     auto_tune_candidates: int = 8
@@ -130,6 +133,9 @@ def _config_summary(cfg: TaylorAttentionConfig) -> Dict[str, Any]:
         "fused_feature_chunk_size": cfg.fused_feature_chunk_size,
         "fused_value_chunk_size": cfg.fused_value_chunk_size,
         "s_store_bf16": cfg.s_store_bf16,
+        "taylor_sigma_max": cfg.taylor_sigma_max,
+        "taylor_layer_start": cfg.taylor_layer_start,
+        "taylor_layer_end": cfg.taylor_layer_end,
     }
 
 _DIAG_SAMPLE_Q = 64
@@ -485,7 +491,7 @@ def _maybe_log_step_stats(transformer_options: Optional[dict], cfg: TaylorAttent
         "den[min=%.6g max=%.6g mean=%.6g frac_le_eps=%.6g] "
         "quality[mean_abs=%.6g max_abs=%.6g mean_rel=%.6g max_rel=%.6g samples=%s] "
         "quality_raw[%s] quality_eff[%s] "
-        "config[qk_normalize=%s qk_norm_power=%.3g qk_norm_clip=%.3g qk_norm_sigma_max=%.3g scale_mul=%.3g sub_head_blocks=%s max_head_dim=%s force_fp32=%s denom_fp32=%s probe_samples=%s denom_fallback_frac_limit=%.3g fused_kernel=%s fused_feature_chunk_size=%s fused_value_chunk_size=%s s_store_bf16=%s]%s",
+        "config[qk_normalize=%s qk_norm_power=%.3g qk_norm_clip=%.3g qk_norm_sigma_max=%.3g scale_mul=%.3g sub_head_blocks=%s max_head_dim=%s force_fp32=%s denom_fp32=%s probe_samples=%s denom_fallback_frac_limit=%.3g fused_kernel=%s fused_feature_chunk_size=%s fused_value_chunk_size=%s s_store_bf16=%s taylor_sigma_max=%.3g taylor_layer_start=%s taylor_layer_end=%s]%s",
         sigma,
         calls,
         step_stats["taylor_calls"],
@@ -518,6 +524,9 @@ def _maybe_log_step_stats(transformer_options: Optional[dict], cfg: TaylorAttent
         cfg_summary["fused_feature_chunk_size"],
         cfg_summary["fused_value_chunk_size"],
         cfg_summary["s_store_bf16"],
+        cfg_summary["taylor_sigma_max"],
+        cfg_summary["taylor_layer_start"],
+        cfg_summary["taylor_layer_end"],
         diag_str,
     )
 
@@ -1476,6 +1485,55 @@ def taylor_attention_override(original_func, *args, **kwargs):
     step_stats = _get_step_stats(transformer_options, cfg)
     if step_stats is not None:
         step_stats["calls"] += 1
+
+    sigma = _get_sigma(transformer_options)
+    if cfg.taylor_sigma_max > 0 and sigma is not None and sigma > cfg.taylor_sigma_max:
+        reason = "skipped_by_sigma"
+        logger.info("Taylor attention skip: sigma=%s > taylor_sigma_max=%s", sigma, cfg.taylor_sigma_max)
+        _update_stats(reason=reason)
+        _maybe_log_stats(cfg)
+        if step_stats is not None:
+            step_stats["fallback_calls"] += 1
+            reasons = step_stats["fallback_reasons"]
+            reasons[reason] = reasons.get(reason, 0) + 1
+        _maybe_log_step_stats(transformer_options, cfg, step_stats)
+        return original_func(*args, **kwargs)
+
+    if cfg.taylor_layer_start >= 0 or cfg.taylor_layer_end >= 0:
+        block_index = None
+        if transformer_options is not None:
+            block_index = transformer_options.get("block_index")
+        if isinstance(block_index, int):
+            if cfg.taylor_layer_start >= 0 and block_index < cfg.taylor_layer_start:
+                reason = "skipped_by_layer"
+                logger.info(
+                    "Taylor attention skip: block_index=%s < taylor_layer_start=%s",
+                    block_index,
+                    cfg.taylor_layer_start,
+                )
+                _update_stats(reason=reason)
+                _maybe_log_stats(cfg)
+                if step_stats is not None:
+                    step_stats["fallback_calls"] += 1
+                    reasons = step_stats["fallback_reasons"]
+                    reasons[reason] = reasons.get(reason, 0) + 1
+                _maybe_log_step_stats(transformer_options, cfg, step_stats)
+                return original_func(*args, **kwargs)
+            if cfg.taylor_layer_end >= 0 and block_index > cfg.taylor_layer_end:
+                reason = "skipped_by_layer"
+                logger.info(
+                    "Taylor attention skip: block_index=%s > taylor_layer_end=%s",
+                    block_index,
+                    cfg.taylor_layer_end,
+                )
+                _update_stats(reason=reason)
+                _maybe_log_stats(cfg)
+                if step_stats is not None:
+                    step_stats["fallback_calls"] += 1
+                    reasons = step_stats["fallback_reasons"]
+                    reasons[reason] = reasons.get(reason, 0) + 1
+                _maybe_log_step_stats(transformer_options, cfg, step_stats)
+                return original_func(*args, **kwargs)
 
     try:
         if config_dict is not None:
