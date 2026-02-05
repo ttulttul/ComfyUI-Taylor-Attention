@@ -18,6 +18,7 @@ except Exception:
     model_management = None
 
 logger = logging.getLogger(__name__)
+_FULL_FUSED_MAX_R = 2_000_000
 
 
 class TaylorAttentionFallback(RuntimeError):
@@ -53,6 +54,7 @@ class TaylorAttentionConfig:
     denom_fp32: bool = True
     denom_fallback_frac_limit: float = 0.0
     fused_kernel: bool = False
+    fused_full_kernel: bool = False
     fused_feature_chunk_size: int = 8192
     fused_value_chunk_size: int = 0
     s_store_bf16: bool = False
@@ -130,6 +132,7 @@ def _config_summary(cfg: TaylorAttentionConfig) -> Dict[str, Any]:
         "probe_samples": cfg.probe_samples,
         "denom_fallback_frac_limit": cfg.denom_fallback_frac_limit,
         "fused_kernel": cfg.fused_kernel,
+        "fused_full_kernel": cfg.fused_full_kernel,
         "fused_feature_chunk_size": cfg.fused_feature_chunk_size,
         "fused_value_chunk_size": cfg.fused_value_chunk_size,
         "s_store_bf16": cfg.s_store_bf16,
@@ -491,7 +494,7 @@ def _maybe_log_step_stats(transformer_options: Optional[dict], cfg: TaylorAttent
         "den[min=%.6g max=%.6g mean=%.6g frac_le_eps=%.6g] "
         "quality[mean_abs=%.6g max_abs=%.6g mean_rel=%.6g max_rel=%.6g samples=%s] "
         "quality_raw[%s] quality_eff[%s] "
-        "config[qk_normalize=%s qk_norm_power=%.3g qk_norm_clip=%.3g qk_norm_sigma_max=%.3g scale_mul=%.3g sub_head_blocks=%s max_head_dim=%s force_fp32=%s denom_fp32=%s probe_samples=%s denom_fallback_frac_limit=%.3g fused_kernel=%s fused_feature_chunk_size=%s fused_value_chunk_size=%s s_store_bf16=%s taylor_sigma_max=%.3g taylor_layer_start=%s taylor_layer_end=%s]%s",
+        "config[qk_normalize=%s qk_norm_power=%.3g qk_norm_clip=%.3g qk_norm_sigma_max=%.3g scale_mul=%.3g sub_head_blocks=%s max_head_dim=%s force_fp32=%s denom_fp32=%s probe_samples=%s denom_fallback_frac_limit=%.3g fused_kernel=%s fused_full_kernel=%s fused_feature_chunk_size=%s fused_value_chunk_size=%s s_store_bf16=%s taylor_sigma_max=%.3g taylor_layer_start=%s taylor_layer_end=%s]%s",
         sigma,
         calls,
         step_stats["taylor_calls"],
@@ -521,6 +524,7 @@ def _maybe_log_step_stats(transformer_options: Optional[dict], cfg: TaylorAttent
         cfg_summary["probe_samples"],
         cfg_summary["denom_fallback_frac_limit"],
         cfg_summary["fused_kernel"],
+        cfg_summary["fused_full_kernel"],
         cfg_summary["fused_feature_chunk_size"],
         cfg_summary["fused_value_chunk_size"],
         cfg_summary["s_store_bf16"],
@@ -1006,6 +1010,28 @@ def _taylor_attention_fused(
     else:
         fused_available = True
 
+    if cfg.fused_full_kernel and fused_available:
+        try:
+            return _taylor_attention_fused_full(
+                cfg,
+                q,
+                k,
+                v,
+                q_orig,
+                k_orig,
+                key_mask_bool,
+                scale_base,
+                scale,
+                step_stats,
+                transformer_options,
+                skip_quality_stats,
+                skip_step_log,
+                skip_output_reshape,
+                den_stats_out=den_stats_out,
+            )
+        except Exception as exc:
+            logger.warning("Taylor full fused kernel failed, falling back to streaming: %s", exc)
+
     batch, heads, n_q, dim_head = q.shape
     n_k = k.shape[2]
     dtype_accum = torch.float32 if cfg.force_fp32 else q.dtype
@@ -1192,6 +1218,164 @@ def _taylor_attention_fused(
     idx = None if skip_quality_stats else _sample_quality_indices(cfg, q_orig)
     quality_raw = None if skip_quality_stats else _compute_quality_stats(cfg, q_orig, k_orig, v, out, key_mask_bool, scale_base, idx=idx)
     quality_eff = None if skip_quality_stats else _compute_quality_stats(cfg, q, k, v, out, key_mask_bool, scale, idx=idx)
+    if den_stats_out is not None:
+        _merge_den_stats(den_stats_out, den_stats)
+    if step_stats is not None:
+        step_stats["taylor_calls"] += 1
+        _merge_den_stats(step_stats["den_stats"], den_stats)
+        _merge_quality_stats(step_stats["quality"], quality_raw)
+        step_stats["quality_raw"] = _quality_stats_to_summary(quality_raw)
+        step_stats["quality_eff"] = _quality_stats_to_summary(quality_eff)
+        _maybe_add_diagnostics(step_stats, transformer_options, q_orig, k_orig, q, k, scale_base, scale)
+        if not skip_step_log:
+            _maybe_log_step_stats(transformer_options, cfg, step_stats)
+
+    out = out.to(dtype=v_dtype)
+    if skip_output_reshape:
+        return out
+    out = out.permute(0, 2, 1, 3).reshape(batch, n_q, heads * dim_head)
+    return out
+
+
+def _taylor_attention_fused_full(
+    cfg: TaylorAttentionConfig,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    q_orig: torch.Tensor,
+    k_orig: torch.Tensor,
+    key_mask_bool: Optional[torch.Tensor],
+    scale_base: float,
+    scale: float,
+    step_stats: Optional[Dict[str, Any]],
+    transformer_options: Optional[dict],
+    skip_quality_stats: bool,
+    skip_step_log: bool,
+    skip_output_reshape: bool,
+    den_stats_out: Optional[Dict[str, float]] = None,
+) -> torch.Tensor:
+    if taylor_triton is None or not taylor_triton.is_available(q.device):
+        raise RuntimeError("triton_unavailable")
+
+    batch, heads, n_q, dim_head = q.shape
+    n_k = k.shape[2]
+    dtype_accum = torch.float32 if cfg.force_fp32 else q.dtype
+    v_dtype = v.dtype
+    den_dtype = torch.float32 if cfg.denom_fp32 else dtype_accum
+
+    v_orig = v
+    k_eff = k
+    if key_mask_bool is not None:
+        key_mask = key_mask_bool.to(dtype=dtype_accum)[:, None, :]
+        k = k_eff.to(dtype=dtype_accum) * key_mask[..., None]
+        v = v_orig.to(dtype=dtype_accum) * key_mask[..., None]
+    else:
+        k = k_eff.to(dtype=dtype_accum)
+        v = v_orig.to(dtype=dtype_accum)
+
+    feature_dim = taylor_sym_features.feature_dim(dim_head, cfg.P)
+    if feature_dim > _FULL_FUSED_MAX_R:
+        raise RuntimeError(f"fused_full_kernel_feature_dim_too_large (R={feature_dim} > max={_FULL_FUSED_MAX_R})")
+    m_max = 0
+    for p in range(cfg.P):
+        m_max = max(m_max, math.comb(dim_head + p - 1, p))
+
+    _maybe_reserve_memory(
+        cfg,
+        q,
+        v,
+        feature_dim,
+        (),
+        max(1, cfg.block_size_q),
+        max(1, cfg.block_size_k),
+        transformer_options,
+        dtype_accum,
+        m_max_override=m_max,
+        d_val_override=v.shape[-1],
+    )
+
+    feature_table = taylor_sym_features.get_feature_table(dim_head, cfg.P, q.device)
+    indices = feature_table.indices
+    degree = feature_table.degree
+    sqrt_w = feature_table.sqrt_w.to(dtype=dtype_accum)
+    if degree.numel() != feature_dim:
+        raise RuntimeError("feature_table_mismatch")
+
+    sqrt_beta = [
+        math.sqrt((scale ** p) / math.factorial(p)) for p in range(cfg.P)
+    ]
+    sqrt_beta_t = torch.tensor(sqrt_beta, dtype=dtype_accum, device=q.device)
+    degree_idx = degree.to(dtype=torch.long)
+    weight = sqrt_w * sqrt_beta_t.index_select(0, degree_idx)
+
+    s_dtype = torch.bfloat16 if cfg.s_store_bf16 else dtype_accum
+    s = torch.zeros((batch, heads, feature_dim, v.shape[-1]), dtype=s_dtype, device=q.device)
+    z = torch.zeros((batch, heads, feature_dim), dtype=dtype_accum, device=q.device)
+
+    block_n = max(1, min(128, cfg.block_size_k))
+    block_q = max(1, min(128, cfg.block_size_q))
+    block_r = 32
+    block_d = 32
+
+    taylor_triton.fused_s_z(
+        k,
+        v,
+        indices,
+        degree,
+        weight,
+        s,
+        z,
+        block_n=block_n,
+        block_r=block_r,
+        block_d=block_d,
+    )
+
+    out = torch.zeros((batch, heads, n_q, v.shape[-1]), dtype=dtype_accum, device=q.device)
+    den = torch.zeros((batch, heads, n_q), dtype=den_dtype, device=q.device)
+
+    taylor_triton.fused_out(
+        q,
+        indices,
+        degree,
+        weight,
+        s,
+        z,
+        out,
+        den,
+        block_q=block_q,
+        block_r=block_r,
+        block_d=block_d,
+    )
+
+    den_stats = _init_den_stats()
+    _accum_den_stats(den_stats, den, cfg.eps)
+
+    if torch.isnan(den).any() or torch.isinf(den).any():
+        if step_stats is not None:
+            _merge_den_stats(step_stats["den_stats"], den_stats)
+        raise TaylorAttentionFallback("denominator_invalid")
+    if cfg.fallback_on_negative:
+        den_le = torch.sum(den <= cfg.eps).item()
+        if cfg.denom_fallback_frac_limit > 0:
+            den_frac = den_le / den.numel()
+            if den_frac > cfg.denom_fallback_frac_limit:
+                if step_stats is not None:
+                    _merge_den_stats(step_stats["den_stats"], den_stats)
+                raise TaylorAttentionFallback("denominator_too_small")
+        else:
+            if den_le > 0:
+                if step_stats is not None:
+                    _merge_den_stats(step_stats["den_stats"], den_stats)
+                raise TaylorAttentionFallback("denominator_too_small")
+
+    den = torch.clamp(den, min=cfg.eps)
+    if den.dtype != dtype_accum:
+        den = den.to(dtype_accum)
+    out = out / den[..., None]
+
+    idx = None if skip_quality_stats else _sample_quality_indices(cfg, q_orig)
+    quality_raw = None if skip_quality_stats else _compute_quality_stats(cfg, q_orig, k_orig, v_orig, out, key_mask_bool, scale_base, idx=idx)
+    quality_eff = None if skip_quality_stats else _compute_quality_stats(cfg, q, k_eff, v_orig, out, key_mask_bool, scale, idx=idx)
     if den_stats_out is not None:
         _merge_den_stats(den_stats_out, den_stats)
     if step_stats is not None:

@@ -115,4 +115,5 @@ python benchmarks/benchmark_flux_forward.py --device cuda --dtype float16 --heig
 - Step stats now include `quality_raw` (vs unmodified attention) and `quality_eff` (vs modified attention) summaries.
 - Quality stats always compare against unmodified attention; `quality_raw` and `quality_eff` share the same sampled indices for comparability.
 - Adjust `quality_check_samples` to control cost.
+- `fused_full_kernel` uses a fully fused Triton path that avoids Python feature loops by precomputing feature tables; it is fastest when feature_dim is modest (e.g., sub-head blocks) but consumes full S/Z memory.
 - Large head dimensions can make feature expansion prohibitively large; `max_feature_dim_R` and `max_head_dim` guard against this.

@@ -16,8 +16,16 @@ class FeatureSpec:
     sqrt_w: torch.Tensor
 
 
+@dataclass(frozen=True)
+class FeatureTable:
+    indices: torch.Tensor
+    degree: torch.Tensor
+    sqrt_w: torch.Tensor
+
+
 _CPU_CACHE: Dict[Tuple[int, int], List[FeatureSpec]] = {}
 _DEVICE_CACHE: Dict[Tuple[int, int, torch.device], List[FeatureSpec]] = {}
+_TABLE_CACHE: Dict[Tuple[int, int, torch.device], FeatureTable] = {}
 _BINOM_CACHE: Dict[Tuple[int, int, torch.device], torch.Tensor] = {}
 
 
@@ -181,6 +189,42 @@ def get_feature_specs(d: int, P: int, device: torch.device) -> List[FeatureSpec]
         )
     _DEVICE_CACHE[key] = specs_device
     return specs_device
+
+
+def get_feature_table(d: int, P: int, device: torch.device) -> FeatureTable:
+    key = (d, P, device)
+    cached = _TABLE_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    cpu_key = (d, P)
+    if cpu_key not in _CPU_CACHE:
+        logger.info("Building Taylor feature specs for d=%s P=%s", d, P)
+        _CPU_CACHE[cpu_key] = _build_cpu_specs(d, P)
+
+    specs_cpu = _CPU_CACHE[cpu_key]
+    p_max = max(P - 1, 0)
+    indices_list = []
+    degree_list = []
+    sqrt_w_list = []
+    for spec in specs_cpu:
+        m = spec.indices.shape[0]
+        if p_max > 0:
+            padded = torch.zeros((m, p_max), dtype=torch.int32)
+            if spec.indices.numel() > 0:
+                padded[:, : spec.indices.shape[1]] = spec.indices.to(dtype=torch.int32)
+        else:
+            padded = torch.empty((m, 0), dtype=torch.int32)
+        indices_list.append(padded)
+        degree_list.append(torch.full((m,), spec.degree, dtype=torch.int16))
+        sqrt_w_list.append(spec.sqrt_w)
+
+    indices = torch.cat(indices_list, dim=0).to(device=device, non_blocking=True)
+    degree = torch.cat(degree_list, dim=0).to(device=device, non_blocking=True)
+    sqrt_w = torch.cat(sqrt_w_list, dim=0).to(device=device, non_blocking=True)
+    table = FeatureTable(indices=indices, degree=degree, sqrt_w=sqrt_w)
+    _TABLE_CACHE[key] = table
+    return table
 
 
 def eval_phi(x: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:

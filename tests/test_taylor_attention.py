@@ -220,11 +220,13 @@ def test_fused_kernel_config():
     cfg = taylor_attention._resolve_config({
         "enabled": True,
         "fused_kernel": True,
+        "fused_full_kernel": True,
         "fused_feature_chunk_size": 4096,
         "fused_value_chunk_size": 256,
         "s_store_bf16": True,
     })
     assert cfg.fused_kernel is True
+    assert cfg.fused_full_kernel is True
     assert cfg.fused_feature_chunk_size == 4096
     assert cfg.fused_value_chunk_size == 256
     assert cfg.s_store_bf16 is True
