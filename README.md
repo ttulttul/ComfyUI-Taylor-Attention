@@ -34,6 +34,8 @@ designed for large token counts where quadratic attention becomes expensive.
   - `probe_samples`: number of queries sampled for the probe (default 16).
   - `denom_fp32`: compute denominators in fp32 to reduce underflow (default true).
   - `denom_fallback_frac_limit`: fallback only if denom<=eps exceeds this fraction (default 0).
+  - `fused_kernel`: use a Triton fused kernel to stream Taylor feature chunks (CUDA only).
+  - `fused_feature_chunk_size`: number of Taylor features processed per chunk when fused (default 8192).
   - `auto_tune`: stochastic search for q/k scaling during early steps.
   - `auto_tune_steps`: number of steps to search (default 1).
   - `auto_tune_candidates`: candidates per step (default 8).
@@ -64,6 +66,10 @@ Example (Flux head_dim=128, P=4, max_feature_dim_R=60000):
 
 Start with `sub_head_blocks=4` for Flux/Flux2 and only increase if you still hit `feature_dim_too_large` or VRAM pressure. Use `quality_check` to sample accuracy when you change this.
 If P=4 is unstable without changing model behavior, try `qk_norm_clip` or `qk_norm_power` before enabling full `qk_normalize`.
+
+### Fused Kernel Notes
+
+If you need to run without `sub_head_blocks`, enable `fused_kernel` and set `sub_head_blocks=1`. This switches to a streaming implementation that avoids allocating the full feature tensor. It requires Triton (`pip install triton`) and CUDA; otherwise it falls back to torch ops.
 
 ## Tests
 

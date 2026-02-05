@@ -216,6 +216,12 @@ def test_auto_tune_config():
     assert cfg.auto_tune_candidates == 4
 
 
+def test_fused_kernel_config():
+    cfg = taylor_attention._resolve_config({"enabled": True, "fused_kernel": True, "fused_feature_chunk_size": 4096})
+    assert cfg.fused_kernel is True
+    assert cfg.fused_feature_chunk_size == 4096
+
+
 def test_sub_head_blocks_config_respected():
     cfg = taylor_attention._resolve_config({"enabled": True, "sub_head_blocks": 3})
     assert cfg.sub_head_blocks == 3
