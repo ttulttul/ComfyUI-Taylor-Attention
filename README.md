@@ -97,5 +97,6 @@ python benchmarks/benchmark_flux_forward.py --device cuda --dtype float16 --heig
 
 - Taylor attention is approximate and may fall back to standard attention if unsupported masks are detected or denominators become unstable.
 - Taylor logs one per sampling step, including aggregated denominator/quality stats and key config values.
+- Step stats now include q/k norm and sampled q·k percentile diagnostics to gauge how far attention is from the Taylor-friendly regime.
 - Quality stats always compare against unmodified attention; adjust `quality_check_samples` to control cost.
 - Large head dimensions can make feature expansion prohibitively large; `max_feature_dim_R` and `max_head_dim` guard against this.

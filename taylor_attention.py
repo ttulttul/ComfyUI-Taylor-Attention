@@ -117,6 +117,80 @@ def _config_summary(cfg: TaylorAttentionConfig) -> Dict[str, Any]:
         "denom_fallback_frac_limit": cfg.denom_fallback_frac_limit,
     }
 
+_DIAG_SAMPLE_Q = 64
+_DIAG_SAMPLE_K = 64
+_DIAG_QUANTILES = torch.tensor([0.5, 0.9, 0.99])
+
+
+def _summarize_stats(values: torch.Tensor) -> Optional[Dict[str, float]]:
+    if values.numel() == 0:
+        return None
+    vals = values.float().flatten()
+    if vals.numel() == 0:
+        return None
+    quantiles = torch.quantile(vals, _DIAG_QUANTILES.to(device=vals.device))
+    return {
+        "min": float(vals.min().item()),
+        "max": float(vals.max().item()),
+        "mean": float(vals.mean().item()),
+        "p50": float(quantiles[0].item()),
+        "p90": float(quantiles[1].item()),
+        "p99": float(quantiles[2].item()),
+    }
+
+
+def _format_stats(stats: Optional[Dict[str, float]]) -> str:
+    if not stats:
+        return "n/a"
+    return (
+        "min={min:.6g} mean={mean:.6g} p50={p50:.6g} "
+        "p90={p90:.6g} p99={p99:.6g} max={max:.6g}"
+    ).format(**stats)
+
+
+def _sample_qk(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    scale: float,
+    max_q: int = _DIAG_SAMPLE_Q,
+    max_k: int = _DIAG_SAMPLE_K,
+) -> torch.Tensor:
+    n_q = q.shape[2]
+    n_k = k.shape[2]
+    q_count = min(max_q, n_q)
+    k_count = min(max_k, n_k)
+    q_idx = torch.randperm(n_q, device=q.device)[:q_count]
+    k_idx = torch.randperm(n_k, device=k.device)[:k_count]
+    q_s = q[:, :, q_idx, :].float()
+    k_s = k[:, :, k_idx, :].float()
+    dots = torch.einsum("b h q d, b h k d -> b h q k", q_s, k_s)
+    return dots * scale
+
+
+def _compute_diagnostics(
+    q_raw: torch.Tensor,
+    k_raw: torch.Tensor,
+    q_eff: torch.Tensor,
+    k_eff: torch.Tensor,
+    scale_raw: float,
+    scale_eff: float,
+) -> Dict[str, str]:
+    with torch.no_grad():
+        q_norm_raw = torch.norm(q_raw.float(), dim=-1)
+        k_norm_raw = torch.norm(k_raw.float(), dim=-1)
+        q_norm_eff = torch.norm(q_eff.float(), dim=-1)
+        k_norm_eff = torch.norm(k_eff.float(), dim=-1)
+        qk_raw = _sample_qk(q_raw, k_raw, scale_raw)
+        qk_eff = _sample_qk(q_eff, k_eff, scale_eff)
+        return {
+            "q_norm_raw": _format_stats(_summarize_stats(q_norm_raw)),
+            "k_norm_raw": _format_stats(_summarize_stats(k_norm_raw)),
+            "q_norm_eff": _format_stats(_summarize_stats(q_norm_eff)),
+            "k_norm_eff": _format_stats(_summarize_stats(k_norm_eff)),
+            "qk_raw": _format_stats(_summarize_stats(qk_raw)),
+            "qk_eff": _format_stats(_summarize_stats(qk_eff)),
+        }
+
 
 def _sample_range(rng, min_val: float, max_val: float) -> float:
     if max_val <= min_val:
@@ -305,6 +379,25 @@ def _should_log_step(transformer_options: Optional[dict]) -> bool:
     return False
 
 
+def _maybe_add_diagnostics(
+    step_stats: Optional[Dict[str, Any]],
+    transformer_options: Optional[dict],
+    q_raw: torch.Tensor,
+    k_raw: torch.Tensor,
+    q_eff: torch.Tensor,
+    k_eff: torch.Tensor,
+    scale_raw: float,
+    scale_eff: float,
+) -> None:
+    if step_stats is None:
+        return
+    if "diag" in step_stats:
+        return
+    if not _should_log_step(transformer_options):
+        return
+    step_stats["diag"] = _compute_diagnostics(q_raw, k_raw, q_eff, k_eff, scale_raw, scale_eff)
+
+
 def _maybe_log_step_stats(transformer_options: Optional[dict], cfg: TaylorAttentionConfig, step_stats: Optional[Dict[str, Any]] = None) -> None:
     if step_stats is None:
         step_stats = _get_step_stats(transformer_options, cfg)
@@ -353,11 +446,19 @@ def _maybe_log_step_stats(transformer_options: Optional[dict], cfg: TaylorAttent
 
     cfg_summary = step_stats["config"]
 
+    diag = step_stats.get("diag")
+    diag_str = ""
+    if diag:
+        diag_str = (
+            " diag[q_norm_raw={q_norm_raw} k_norm_raw={k_norm_raw} qk_raw={qk_raw} "
+            "q_norm_eff={q_norm_eff} k_norm_eff={k_norm_eff} qk_eff={qk_eff}]"
+        ).format(**diag)
+
     logger.info(
         "Taylor step stats: sigma=%s calls=%s taylor=%s fallback=%s denom_fallback_frac=%.6g "
         "den[min=%.6g max=%.6g mean=%.6g frac_le_eps=%.6g] "
         "quality[mean_abs=%.6g max_abs=%.6g mean_rel=%.6g max_rel=%.6g samples=%s] "
-        "config[qk_normalize=%s qk_norm_power=%.3g qk_norm_clip=%.3g scale_mul=%.3g sub_head_blocks=%s force_fp32=%s denom_fp32=%s probe_samples=%s denom_fallback_frac_limit=%.3g]",
+        "config[qk_normalize=%s qk_norm_power=%.3g qk_norm_clip=%.3g scale_mul=%.3g sub_head_blocks=%s force_fp32=%s denom_fp32=%s probe_samples=%s denom_fallback_frac_limit=%.3g]%s",
         sigma,
         calls,
         step_stats["taylor_calls"],
@@ -381,6 +482,7 @@ def _maybe_log_step_stats(transformer_options: Optional[dict], cfg: TaylorAttent
         cfg_summary["denom_fp32"],
         cfg_summary["probe_samples"],
         cfg_summary["denom_fallback_frac_limit"],
+        diag_str,
     )
 
     if transformer_options is not None:
@@ -1015,6 +1117,7 @@ def taylor_attention(
         step_stats["taylor_calls"] += 1
         _merge_den_stats(step_stats["den_stats"], den_stats)
         _merge_quality_stats(step_stats["quality"], quality_stats)
+        _maybe_add_diagnostics(step_stats, transformer_options, q_orig, k_orig, q, k, scale_base, scale)
         if not skip_step_log:
             _maybe_log_step_stats(transformer_options, cfg, step_stats)
 

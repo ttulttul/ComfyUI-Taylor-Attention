@@ -12,3 +12,4 @@
 - Denominator fallbacks can now be gated by a fraction threshold to avoid over-triggering.
 - Quality stats are now computed against unmodified attention, even when Q/K are adjusted.
 - Auto-tune mode can search q/k scaling during early steps and lock in a best config.
+- Step logs now include q/k norm and sampled q·k percentile diagnostics to measure regime mismatch.
