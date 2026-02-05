@@ -5,6 +5,7 @@ from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 
 import taylor_attention
+import hybrid_attention
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,52 @@ def _build_config(
         "quality_check_log_every": int(quality_check_log_every),
         "log_shapes": bool(log_shapes),
         "log_fallbacks": bool(log_fallbacks),
+    }
+
+
+def _build_hybrid_config(
+    enabled: bool,
+    local_window: int,
+    local_chunk: int,
+    global_dim: int,
+    global_P: int,
+    global_weight: float,
+    global_sigma_low: float,
+    global_sigma_high: float,
+    global_scale_mul: float,
+    global_norm_power: float,
+    global_norm_clip: float,
+    use_pca: bool,
+    pca_samples: int,
+    allow_cross_attention: bool,
+    layer_start: int,
+    layer_end: int,
+    eps: float,
+    force_fp32: bool,
+    log_steps: bool,
+) -> Dict[str, Any]:
+    if not enabled:
+        return {"enabled": False}
+    return {
+        "enabled": True,
+        "local_window": int(local_window),
+        "local_chunk": int(local_chunk),
+        "global_dim": int(global_dim),
+        "global_P": int(global_P),
+        "global_weight": float(global_weight),
+        "global_sigma_low": float(global_sigma_low),
+        "global_sigma_high": float(global_sigma_high),
+        "global_scale_mul": float(global_scale_mul),
+        "global_norm_power": float(global_norm_power),
+        "global_norm_clip": float(global_norm_clip),
+        "use_pca": bool(use_pca),
+        "pca_samples": int(pca_samples),
+        "allow_cross_attention": bool(allow_cross_attention),
+        "layer_start": int(layer_start),
+        "layer_end": int(layer_end),
+        "eps": float(eps),
+        "force_fp32": bool(force_fp32),
+        "log_steps": bool(log_steps),
     }
 
 
@@ -301,10 +348,101 @@ class TaylorAttentionBackend(io.ComfyNode):
         return io.NodeOutput(m)
 
 
+class HybridTaylorAttentionBackend(io.ComfyNode):
+    @classmethod
+    def define(cls) -> io.NodeDef:
+        return io.NodeDef(
+            node_id="HybridTaylorAttentionBackend",
+            display_name="Hybrid Taylor Attention Backend",
+            category="advanced/attention",
+            description="Hybrid local exact attention with global low-dim Taylor approximation (Flux RoPE-compatible).",
+            inputs=[
+                io.Model.Input("model"),
+                io.Boolean.Input("enabled", default=False, tooltip="Enable hybrid attention override for Flux."),
+                io.Int.Input("local_window", default=512, min=0, max=8192, step=1, tooltip="Local window radius for exact attention (0 = full)."),
+                io.Int.Input("local_chunk", default=256, min=1, max=4096, step=1, tooltip="Query chunk size for local attention."),
+                io.Int.Input("global_dim", default=16, min=1, max=128, step=1, tooltip="Projection dimension for global approximation."),
+                io.Int.Input("global_P", default=2, min=1, max=4, step=1, tooltip="Taylor order for global approximation."),
+                io.Float.Input("global_weight", default=0.1, min=0.0, max=4.0, step=0.01, tooltip="Scale applied to global approximation."),
+                io.Float.Input("global_sigma_low", default=0.0, min=0.0, max=50.0, step=0.01, tooltip="Sigma below which global weight is 0."),
+                io.Float.Input("global_sigma_high", default=0.0, min=0.0, max=50.0, step=0.01, tooltip="Sigma above which global weight is full (0 disables ramp)."),
+                io.Float.Input("global_scale_mul", default=1.0, min=0.0, max=4.0, step=0.01, tooltip="Scale multiplier for global q·k before Taylor."),
+                io.Float.Input("global_norm_power", default=0.0, min=0.0, max=1.0, step=0.05, tooltip="Global q/k norm power (0 disables)."),
+                io.Float.Input("global_norm_clip", default=0.0, min=0.0, max=100.0, step=0.5, tooltip="Global q/k norm clip (0 disables)."),
+                io.Boolean.Input("use_pca", default=True, tooltip="Compute PCA projection for global approximation."),
+                io.Int.Input("pca_samples", default=2048, min=0, max=65536, step=256, tooltip="Samples used for PCA projection (0 = full)."),
+                io.Boolean.Input("allow_cross_attention", default=True, tooltip="Allow hybrid attention on cross-attention."),
+                io.Int.Input("layer_start", default=-1, min=-1, max=512, step=1, tooltip="Only run hybrid on block_index >= this value (-1 disables)."),
+                io.Int.Input("layer_end", default=-1, min=-1, max=512, step=1, tooltip="Only run hybrid on block_index <= this value (-1 disables)."),
+                io.Float.Input("eps", default=1e-6, min=1e-12, max=1e-2, step=1e-6),
+                io.Boolean.Input("force_fp32", default=True, tooltip="Use fp32 for global approximation."),
+                io.Boolean.Input("log_steps", default=True, tooltip="Log hybrid attention stats per step."),
+            ],
+            outputs=[io.Model.Output()],
+            is_experimental=True,
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        model,
+        enabled: bool,
+        local_window: int,
+        local_chunk: int,
+        global_dim: int,
+        global_P: int,
+        global_weight: float,
+        global_sigma_low: float,
+        global_sigma_high: float,
+        global_scale_mul: float,
+        global_norm_power: float,
+        global_norm_clip: float,
+        use_pca: bool,
+        pca_samples: int,
+        allow_cross_attention: bool,
+        layer_start: int,
+        layer_end: int,
+        eps: float,
+        force_fp32: bool,
+        log_steps: bool,
+    ) -> io.NodeOutput:
+        m = model.clone()
+        transformer_options = m.model_options.setdefault("transformer_options", {})
+
+        if enabled:
+            hybrid_attention.enable_hybrid_attention()
+            transformer_options["hybrid_taylor_attention"] = _build_hybrid_config(
+                enabled,
+                local_window,
+                local_chunk,
+                global_dim,
+                global_P,
+                global_weight,
+                global_sigma_low,
+                global_sigma_high,
+                global_scale_mul,
+                global_norm_power,
+                global_norm_clip,
+                use_pca,
+                pca_samples,
+                allow_cross_attention,
+                layer_start,
+                layer_end,
+                eps,
+                force_fp32,
+                log_steps,
+            )
+        else:
+            transformer_options.pop("hybrid_taylor_attention", None)
+            hybrid_attention.disable_hybrid_attention()
+
+        return io.NodeOutput(m)
+
+
 class TaylorAttentionExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [TaylorAttentionBackend]
+        return [TaylorAttentionBackend, HybridTaylorAttentionBackend]
 
 
 async def comfy_entrypoint() -> TaylorAttentionExtension:

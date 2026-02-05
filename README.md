@@ -116,4 +116,13 @@ python benchmarks/benchmark_flux_forward.py --device cuda --dtype float16 --heig
 - Quality stats always compare against unmodified attention; `quality_raw` and `quality_eff` share the same sampled indices for comparability.
 - Adjust `quality_check_samples` to control cost.
 - `fused_full_kernel` uses a fully fused Triton path that avoids Python feature loops by precomputing feature tables; it is fastest when feature_dim is modest (e.g., sub-head blocks) but consumes full S/Z memory.
+
+## Hybrid Local/Global Attention (Flux RoPE)
+
+The `HybridTaylorAttentionBackend` node patches Flux's attention function directly to support a hybrid strategy:
+
+- **Local exact attention** (with RoPE) in a sliding window.
+- **Global low-dim Taylor approximation** using pre-RoPE Q/K projected to a small dimension.
+
+This is intended for very large images where full attention is prohibitive. It is an approximate inference hack and will change model behavior.
 - Large head dimensions can make feature expansion prohibitively large; `max_feature_dim_R` and `max_head_dim` guard against this.

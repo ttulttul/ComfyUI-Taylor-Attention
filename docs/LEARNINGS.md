@@ -26,3 +26,4 @@
 - Added taylor_sigma_max and taylor_layer_start/end gates to skip Taylor at high sigma or outside block ranges.
 - quality_raw and quality_eff now share the same sampled query indices for apples-to-apples comparisons.
 - Added a fully fused Triton path (fused_full_kernel) that uses precomputed feature tables to avoid Python feature loops.
+- Added a hybrid local/global attention node that patches Flux attention to combine local RoPE attention with a global low-dim Taylor approximation.
