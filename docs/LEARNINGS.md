@@ -18,3 +18,4 @@
 - Step stats now surface fallback reasons and max_head_dim for easier triage.
 - Added fused value-dimension chunking and bf16 S-chunk storage to reduce memory in fused path.
 - Step stats now log both quality_raw (unmodified) and quality_eff (modified) metrics.
+- Feature-dimension fallback logs now always include the rejected R value.

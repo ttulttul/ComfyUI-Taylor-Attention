@@ -1199,16 +1199,15 @@ def taylor_attention(
 
         feature_dim = taylor_sym_features.feature_dim(block_dim, cfg.P)
         if feature_dim > cfg.max_feature_dim_R:
-            if cfg.log_fallbacks:
-                logger.warning(
-                    "Taylor attention fallback: feature_dim_too_large (R=%s > max_feature_dim_R=%s) head_dim=%s block_dim=%s sub_head_blocks=%s P=%s",
-                    feature_dim,
-                    cfg.max_feature_dim_R,
-                    dim_head,
-                    block_dim,
-                    sub_head_blocks,
-                    cfg.P,
-                )
+            logger.warning(
+                "Taylor attention fallback: feature_dim_too_large (R=%s > max_feature_dim_R=%s) head_dim=%s block_dim=%s sub_head_blocks=%s P=%s",
+                feature_dim,
+                cfg.max_feature_dim_R,
+                dim_head,
+                block_dim,
+                sub_head_blocks,
+                cfg.P,
+            )
             raise TaylorAttentionFallback("feature_dim_too_large")
 
         sub_config = _clone_config(config, cfg)
@@ -1254,14 +1253,13 @@ def taylor_attention(
 
     feature_dim = taylor_sym_features.feature_dim(dim_head, cfg.P)
     if feature_dim > cfg.max_feature_dim_R:
-        if cfg.log_fallbacks:
-            logger.warning(
-                "Taylor attention fallback: feature_dim_too_large (R=%s > max_feature_dim_R=%s) head_dim=%s P=%s",
-                feature_dim,
-                cfg.max_feature_dim_R,
-                dim_head,
-                cfg.P,
-            )
+        logger.warning(
+            "Taylor attention fallback: feature_dim_too_large (R=%s > max_feature_dim_R=%s) head_dim=%s P=%s",
+            feature_dim,
+            cfg.max_feature_dim_R,
+            dim_head,
+            cfg.P,
+        )
         raise TaylorAttentionFallback("feature_dim_too_large")
 
     dtype_accum = torch.float32 if cfg.force_fp32 else q.dtype
