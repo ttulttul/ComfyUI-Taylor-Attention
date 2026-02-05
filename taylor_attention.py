@@ -244,10 +244,55 @@ def _probe_denominators(
             den += torch.einsum("b h n r, b h r -> b h n", psi_q, z_slice)
         offset += m_p
 
+    probe_stats = _init_den_stats()
+    _accum_den_stats(probe_stats, den, eps)
+    _log_den_stats(probe_stats, prefix="Taylor denominator stats (probe)")
+
     if torch.isnan(den).any() or torch.isinf(den).any():
         raise TaylorAttentionFallback("denominator_invalid")
     if cfg.fallback_on_negative and torch.any(den <= eps):
         raise TaylorAttentionFallback("denominator_too_small")
+
+
+
+def _init_den_stats() -> Dict[str, float]:
+    return {"min": None, "max": None, "sum": 0.0, "count": 0, "le_eps": 0, "blocks": 0}
+
+
+def _accum_den_stats(stats: Dict[str, float], den: torch.Tensor, eps: float) -> None:
+    den_f = den.float()
+    min_val = float(den_f.min().item())
+    max_val = float(den_f.max().item())
+    sum_val = float(den_f.sum().item())
+    count = int(den_f.numel())
+    le_eps = int((den_f <= eps).sum().item())
+
+    if stats["min"] is None or min_val < stats["min"]:
+        stats["min"] = min_val
+    if stats["max"] is None or max_val > stats["max"]:
+        stats["max"] = max_val
+    stats["sum"] += sum_val
+    stats["count"] += count
+    stats["le_eps"] += le_eps
+    stats["blocks"] += 1
+
+
+def _log_den_stats(stats: Dict[str, float], prefix: str = "Taylor denominator stats") -> None:
+    if stats["count"] <= 0:
+        return
+    mean_val = stats["sum"] / stats["count"]
+    frac_le = stats["le_eps"] / stats["count"]
+    logger.info(
+        "%s: min=%.6g max=%.6g mean=%.6g frac_le_eps=%.6g blocks=%s",
+        prefix,
+        stats["min"],
+        stats["max"],
+        mean_val,
+        frac_le,
+        stats["blocks"],
+    )
+
+
 def _log_shapes_once(config: TaylorAttentionConfig, transformer_options: Optional[dict], q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[torch.Tensor], scale: float, skip_reshape: bool) -> None:
     if not config.log_shapes:
         return
@@ -544,6 +589,7 @@ def taylor_attention(
     out = torch.empty((batch, heads, n_q, v.shape[-1]), dtype=dtype_accum, device=q.device)
 
     den_dtype = torch.float32 if cfg.denom_fp32 else dtype_accum
+    den_stats = _init_den_stats()
 
     for start in range(0, n_q, block_q):
         end = min(start + block_q, n_q)
@@ -564,14 +610,23 @@ def taylor_attention(
                 den += torch.einsum("b h n r, b h r -> b h n", psi_q, z_slice)
             offset += m_p
 
-        if torch.isnan(den).any() or torch.isinf(den).any():
+        _accum_den_stats(den_stats, den, cfg.eps)
+        probe_stats = _init_den_stats()
+    _accum_den_stats(probe_stats, den, eps)
+    _log_den_stats(probe_stats, prefix="Taylor denominator stats (probe)")
+
+    if torch.isnan(den).any() or torch.isinf(den).any():
+            _log_den_stats(den_stats, prefix="Taylor denominator stats (partial)")
             raise TaylorAttentionFallback("denominator_invalid")
         if cfg.fallback_on_negative and torch.any(den <= cfg.eps):
+            _log_den_stats(den_stats, prefix="Taylor denominator stats (partial)")
             raise TaylorAttentionFallback("denominator_too_small")
         den = torch.clamp(den, min=cfg.eps)
         if den.dtype != dtype_accum:
             den = den.to(dtype_accum)
         out[:, :, start:end, :] = num / den[..., None]
+
+    _log_den_stats(den_stats)
 
     _run_quality_check(cfg, q, k, v, out, key_mask_bool, scale)
 

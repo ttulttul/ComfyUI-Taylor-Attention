@@ -6,3 +6,4 @@
 - Early-probe and fp32 denominator options help avoid slow Taylor fallbacks when denominators go unstable.
 - Sub-head block Taylor splits each head into smaller blocks to reduce feature dimension while keeping P fixed.
 - Defaults now target diffusion-scale workloads (low min_tokens, sub-head blocks, and tighter block sizes).
+- Denominator stats are now logged on every Taylor call for stability debugging.

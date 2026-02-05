@@ -83,4 +83,5 @@ python benchmarks/benchmark_flux_forward.py --device cuda --dtype float16 --heig
 ## Notes
 
 - Taylor attention is approximate and may fall back to standard attention if unsupported masks are detected or denominators become unstable.
+- Denominator stats are logged for every Taylor call to help debug stability issues.
 - Large head dimensions can make feature expansion prohibitively large; `max_feature_dim_R` and `max_head_dim` guard against this.

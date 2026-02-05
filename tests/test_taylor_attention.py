@@ -281,6 +281,42 @@ def test_sub_head_blocks_mismatch_fallback():
     assert exc.value.reason == "sub_head_block_mismatch"
 
 
+def test_denominator_stats_logs(caplog):
+    device = torch.device("cpu")
+    batch = 1
+    heads = 2
+    tokens = 32
+    dim_head = 16
+
+    q, k, v = _make_qkv(batch, heads, tokens, dim_head, device)
+
+    config = {
+        "enabled": True,
+        "P": 3,
+        "min_tokens": 0,
+        "max_feature_dim_R": 200000,
+        "block_size_q": 32,
+        "block_size_k": 32,
+        "eps": 1e-6,
+        "fallback_on_negative": False,
+        "allow_cross_attention": True,
+        "max_head_dim": 128,
+        "early_probe": False,
+    }
+
+    caplog.set_level(logging.INFO, logger="taylor_attention")
+    taylor_attention.taylor_attention(
+        q,
+        k,
+        v,
+        heads,
+        skip_reshape=True,
+        config=config,
+    )
+
+    assert "Taylor denominator stats" in caplog.text
+
+
 def test_quality_check_logs(caplog):
     device = torch.device("cpu")
     batch = 1
