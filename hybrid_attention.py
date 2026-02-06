@@ -199,7 +199,7 @@ def _local_attention(
     if window <= 0:
         return optimized_attention(q, k, v, heads, skip_reshape=True, mask=mask, transformer_options=transformer_options)
 
-    out = torch.zeros_like(q)
+    out = torch.zeros((batch, n_q, heads * dim_head), device=q.device, dtype=q.dtype)
     chunk = max(1, chunk)
     window = max(1, window)
     for start in range(0, n_q, chunk):
@@ -207,7 +207,7 @@ def _local_attention(
         k_start = max(0, start - window)
         k_end = min(n_k, end + window)
         mask_slice = _slice_mask(mask, start, end, k_start, k_end)
-        out[:, :, start:end, :] = optimized_attention(
+        out[:, start:end, :] = optimized_attention(
             q[:, :, start:end, :],
             k[:, :, k_start:k_end, :],
             v[:, :, k_start:k_end, :],
@@ -267,6 +267,8 @@ def hybrid_attention(q, k, v, pe, mask=None, transformer_options=None):
     v_global = v.float() if cfg.force_fp32 else v
     global_out = _global_taylor_attention(cfg, q_global, k_global, v_global, key_mask, scale=1.0)
 
+    if local_out.ndim == 3:
+        global_out = global_out.permute(0, 2, 1, 3).reshape(local_out.shape[0], local_out.shape[1], -1)
     out = local_out + global_weight * global_out
     if cfg.log_steps:
         logger.info(
