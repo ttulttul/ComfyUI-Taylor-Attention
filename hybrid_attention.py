@@ -383,6 +383,15 @@ def pre_run_callback(patcher):
     cfg = transformer_options.get("hybrid_taylor_attention")
     if not cfg or not cfg.get("enabled", False):
         return
+    if cfg.get("log_steps", False):
+        logger.info(
+            "Hybrid attention pre-run: enabled local_window=%s prefix_tokens=%s global_dim=%s global_P=%s global_weight=%.3g",
+            cfg.get("local_window"),
+            cfg.get("prefix_tokens"),
+            cfg.get("global_dim"),
+            cfg.get("global_P"),
+            cfg.get("global_weight"),
+        )
     patch_flux_attention()
 
 
@@ -392,3 +401,5 @@ def cleanup_callback(patcher):
     if not cfg or not cfg.get("enabled", False):
         return
     restore_flux_attention()
+    if cfg.get("log_steps", False):
+        logger.info("Hybrid attention cleanup: restored Flux attention")
