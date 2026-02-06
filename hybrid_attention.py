@@ -16,6 +16,30 @@ _PATCH_DEPTH = 0
 _PCA_CACHE: Dict[Tuple[torch.device, int, int, torch.dtype], torch.Tensor] = {}
 _HYBRID_QUALITY: Dict[str, float] = {"sum_abs": 0.0, "sum_rel": 0.0, "max_abs": 0.0, "max_rel": 0.0, "samples": 0.0, "calls": 0.0}
 _QUALITY_SAMPLES = 8
+_CONFIG_LOG_KEYS = (
+    "local_window",
+    "local_window_min",
+    "local_window_max",
+    "local_window_sigma_low",
+    "local_window_sigma_high",
+    "local_chunk",
+    "prefix_tokens",
+    "global_dim",
+    "global_P",
+    "global_weight",
+    "global_sigma_low",
+    "global_sigma_high",
+    "global_scale_mul",
+    "global_norm_power",
+    "global_norm_clip",
+    "use_pca",
+    "pca_samples",
+    "allow_cross_attention",
+    "layer_start",
+    "layer_end",
+    "eps",
+    "force_fp32",
+)
 
 
 @dataclass
@@ -188,6 +212,20 @@ def _format_quality_summary() -> Optional[str]:
         int(samples),
         int(_HYBRID_QUALITY["calls"]),
     )
+
+
+def _format_config_summary(cfg: Dict[str, Any]) -> str:
+    parts = []
+    for key in _CONFIG_LOG_KEYS:
+        if key not in cfg:
+            continue
+        value = cfg.get(key)
+        if isinstance(value, float):
+            value_str = f"{value:.6g}"
+        else:
+            value_str = str(value)
+        parts.append(f"{key}={value_str}")
+    return "config[" + " ".join(parts) + "]"
 
 
 def _maybe_log_quality_stats(
@@ -550,6 +588,6 @@ def cleanup_callback(patcher):
     if cfg.get("log_quality_stats", False):
         summary = _format_quality_summary()
         if summary:
-            logger.info("Hybrid attention quality stats: %s", summary)
+            logger.info("Hybrid attention quality stats: %s %s", summary, _format_config_summary(cfg))
     if cfg.get("log_steps", False):
         logger.info("Hybrid attention cleanup: restored Flux attention")

@@ -125,6 +125,7 @@ The `HybridTaylorAttentionBackend` node patches Flux's attention function at run
 - **Global low-dim Taylor approximation** using pre-RoPE Q/K projected to a small dimension.
 - Optional `log_quality_stats` computes 8 sampled hybrid-vs-exact comparisons per attention call and logs a single aggregate after sampling completes.
 - Local window can be scheduled by sigma via `local_window_min/max` and `local_window_sigma_low/high` (window shrinks as sigma decreases using a smoothstep curve; use `local_window` when schedule is disabled). A value of `0` means "full attention", so scheduled endpoints use the current sequence length as the full window.
+- Quality stats logs include the hybrid config parameters used for the run.
 
 This is intended for very large images where full attention is prohibitive. It is an approximate inference hack and will change model behavior.
 - Large head dimensions can make feature expansion prohibitively large; `max_feature_dim_R` and `max_head_dim` guard against this.

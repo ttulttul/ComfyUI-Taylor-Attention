@@ -37,3 +37,4 @@
 - Local window scheduling treats a value of 0 as "full attention" and substitutes the current sequence length during interpolation.
 - Local window scheduling now uses a smoothstep (sigmoid-like) curve for gentler start/end transitions.
 - Hybrid global Taylor now aligns accumulation dtype with force_fp32 to avoid bf16/fp32 einsum mismatches.
+- Hybrid quality stats logs now include the active hybrid config parameters for reproducibility.

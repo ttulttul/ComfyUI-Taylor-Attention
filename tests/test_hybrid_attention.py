@@ -75,6 +75,15 @@ def test_global_taylor_attention_dtype_matches_input():
     assert out.dtype == v.dtype
 
 
+def test_format_config_summary_includes_keys():
+    cfg = {"local_window": 0, "global_dim": 4, "global_weight": 0.1, "force_fp32": True}
+    summary = hybrid_attention._format_config_summary(cfg)
+    assert "local_window=0" in summary
+    assert "global_dim=4" in summary
+    assert "global_weight=0.1" in summary
+    assert "force_fp32=True" in summary
+
+
 def test_pre_run_callback_reads_model_options(monkeypatch):
     called = {"patch": 0}
 
