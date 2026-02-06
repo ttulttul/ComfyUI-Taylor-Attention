@@ -367,7 +367,7 @@ class HybridTaylorAttentionBackend(io.ComfyNode):
                 io.Model.Input("model"),
                 io.Boolean.Input("enabled", default=False, tooltip="Enable hybrid attention override for Flux."),
                 io.Int.Input("local_window", default=512, min=0, max=8192, step=1, tooltip="Local window radius for exact attention (0 = full)."),
-                io.Int.Input("local_chunk", default=256, min=1, max=4096, step=1, tooltip="Query chunk size for local attention."),
+                io.Int.Input("local_chunk", default=256, min=1, max=1000000000, step=1, tooltip="Query chunk size for local attention."),
                 io.Int.Input("prefix_tokens", default=0, min=0, max=8192, step=1, tooltip="Always include the first N tokens (e.g., text tokens) in local attention."),
                 io.Int.Input("global_dim", default=16, min=1, max=128, step=1, tooltip="Projection dimension for global approximation."),
                 io.Int.Input("global_P", default=2, min=1, max=4, step=1, tooltip="Taylor order for global approximation."),
