@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 _ORIGINAL_FLUX_ATTENTION: Dict[str, Any] = {}
 _PATCH_DEPTH = 0
 _PCA_CACHE: Dict[Tuple[torch.device, int, int], torch.Tensor] = {}
+_HYBRID_QUALITY: Dict[str, float] = {"sum_abs": 0.0, "sum_rel": 0.0, "max_abs": 0.0, "max_rel": 0.0, "samples": 0.0, "calls": 0.0}
+_QUALITY_SAMPLES = 8
 
 
 @dataclass
@@ -38,6 +40,7 @@ class HybridAttentionConfig:
     eps: float = 1e-6
     force_fp32: bool = True
     log_steps: bool = True
+    log_quality_stats: bool = False
 
 
 def _resolve_config(config: Optional[Dict[str, Any]]) -> HybridAttentionConfig:
@@ -119,6 +122,91 @@ def _project_pca(q: torch.Tensor, k: torch.Tensor, d_low: int, samples: int) -> 
     proj = v[:, :d_low].to(dtype=q.dtype, device=q.device)
     _PCA_CACHE[key] = proj
     return proj
+
+
+def _reset_quality_stats() -> None:
+    _HYBRID_QUALITY["sum_abs"] = 0.0
+    _HYBRID_QUALITY["sum_rel"] = 0.0
+    _HYBRID_QUALITY["max_abs"] = 0.0
+    _HYBRID_QUALITY["max_rel"] = 0.0
+    _HYBRID_QUALITY["samples"] = 0.0
+    _HYBRID_QUALITY["calls"] = 0.0
+
+
+def _merge_quality_stats(diff: torch.Tensor, rel: torch.Tensor) -> None:
+    _HYBRID_QUALITY["sum_abs"] += float(diff.sum().item())
+    _HYBRID_QUALITY["sum_rel"] += float(rel.sum().item())
+    _HYBRID_QUALITY["max_abs"] = max(_HYBRID_QUALITY["max_abs"], float(diff.max().item()))
+    _HYBRID_QUALITY["max_rel"] = max(_HYBRID_QUALITY["max_rel"], float(rel.max().item()))
+    _HYBRID_QUALITY["samples"] += float(diff.numel())
+    _HYBRID_QUALITY["calls"] += 1.0
+
+
+def _format_quality_summary() -> Optional[str]:
+    samples = _HYBRID_QUALITY["samples"]
+    if samples <= 0:
+        return None
+    mean_abs = _HYBRID_QUALITY["sum_abs"] / samples
+    mean_rel = _HYBRID_QUALITY["sum_rel"] / samples
+    return (
+        "mean_abs={:.6g} max_abs={:.6g} mean_rel={:.6g} max_rel={:.6g} "
+        "samples={} calls={}"
+    ).format(
+        mean_abs,
+        _HYBRID_QUALITY["max_abs"],
+        mean_rel,
+        _HYBRID_QUALITY["max_rel"],
+        int(samples),
+        int(_HYBRID_QUALITY["calls"]),
+    )
+
+
+def _maybe_log_quality_stats(
+    cfg: HybridAttentionConfig,
+    q_rope: torch.Tensor,
+    k_rope: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    mask: Optional[torch.Tensor],
+) -> None:
+    if not cfg.log_quality_stats:
+        return
+    n_q = q_rope.shape[2]
+    if n_q <= 0:
+        return
+    samples = min(_QUALITY_SAMPLES, n_q)
+    if samples <= 0:
+        return
+
+    idx = torch.randperm(n_q, device=q_rope.device)[:samples]
+    q_s = q_rope[:, :, idx, :].float()
+    k_f = k_rope.float()
+    v_f = v.float()
+
+    scores = torch.einsum("b h s d, b h n d -> b h s n", q_s, k_f)
+    if mask is not None:
+        try:
+            import taylor_attention
+
+            key_mask = taylor_attention._normalize_key_mask(mask, q_rope.shape[0], q_rope.shape[1], q_rope.shape[2], k_rope.shape[2])
+            if key_mask is not None:
+                mask_bool = key_mask[:, None, None, :].to(device=scores.device)
+                scores = scores.masked_fill(~mask_bool, float("-inf"))
+        except Exception:
+            pass
+
+    attn = torch.softmax(scores, dim=-1)
+    exact = torch.einsum("b h s n, b h n d -> b h s d", attn, v_f)
+    exact_flat = exact.permute(0, 2, 1, 3).reshape(exact.shape[0], exact.shape[2], -1)
+
+    approx = out
+    if approx.ndim == 4:
+        approx = approx.permute(0, 2, 1, 3).reshape(exact_flat.shape[0], exact_flat.shape[1], -1)
+    approx = approx[:, idx, :].float()
+
+    diff = (approx - exact_flat).abs()
+    rel = diff / (exact_flat.abs() + 1e-6)
+    _merge_quality_stats(diff, rel)
 
 
 def _apply_qk_norm(q: torch.Tensor, k: torch.Tensor, power: float, clip: float, eps: float) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -295,6 +383,7 @@ def hybrid_attention(q, k, v, pe, mask=None, transformer_options=None):
     )
 
     if global_weight <= 0:
+        _maybe_log_quality_stats(cfg, q_rope, k_rope, v, local_out, mask)
         if cfg.log_steps:
             logger.info(
                 "Hybrid attention: sigma=%s local_window=%s prefix_tokens=%s global_weight=0 (global skipped)",
@@ -323,6 +412,7 @@ def hybrid_attention(q, k, v, pe, mask=None, transformer_options=None):
         global_out = global_out.to(dtype=local_out.dtype)
     weight = torch.tensor(global_weight, dtype=local_out.dtype, device=local_out.device)
     out = local_out + weight * global_out
+    _maybe_log_quality_stats(cfg, q_rope, k_rope, v, out, mask)
     if cfg.log_steps:
         logger.info(
             "Hybrid attention: sigma=%s local_window=%s prefix_tokens=%s global_dim=%s global_P=%s global_weight=%.3g",
@@ -395,6 +485,8 @@ def pre_run_callback(patcher):
     cfg = transformer_options.get("hybrid_taylor_attention")
     if not cfg or not cfg.get("enabled", False):
         return
+    if cfg.get("log_quality_stats", False):
+        _reset_quality_stats()
     if cfg.get("log_steps", False):
         logger.info(
             "Hybrid attention pre-run: enabled local_window=%s prefix_tokens=%s global_dim=%s global_P=%s global_weight=%.3g",
@@ -415,5 +507,9 @@ def cleanup_callback(patcher):
     if not cfg or not cfg.get("enabled", False):
         return
     restore_flux_attention()
+    if cfg.get("log_quality_stats", False):
+        summary = _format_quality_summary()
+        if summary:
+            logger.info("Hybrid attention quality stats: %s", summary)
     if cfg.get("log_steps", False):
         logger.info("Hybrid attention cleanup: restored Flux attention")

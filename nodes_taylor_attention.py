@@ -140,6 +140,7 @@ def _build_hybrid_config(
     eps: float,
     force_fp32: bool,
     log_steps: bool,
+    log_quality_stats: bool,
 ) -> Dict[str, Any]:
     if not enabled:
         return {"enabled": False}
@@ -164,6 +165,7 @@ def _build_hybrid_config(
         "eps": float(eps),
         "force_fp32": bool(force_fp32),
         "log_steps": bool(log_steps),
+        "log_quality_stats": bool(log_quality_stats),
     }
 
 
@@ -383,6 +385,7 @@ class HybridTaylorAttentionBackend(io.ComfyNode):
                 io.Float.Input("eps", default=1e-6, min=1e-12, max=1e-2, step=1e-6),
                 io.Boolean.Input("force_fp32", default=True, tooltip="Use fp32 for global approximation."),
                 io.Boolean.Input("log_steps", default=True, tooltip="Log hybrid attention stats per step."),
+                io.Boolean.Input("log_quality_stats", default=False, tooltip="Log hybrid-vs-exact quality stats after sampling completes."),
             ],
             outputs=[io.Model.Output()],
             is_experimental=True,
@@ -412,6 +415,7 @@ class HybridTaylorAttentionBackend(io.ComfyNode):
         eps: float,
         force_fp32: bool,
         log_steps: bool,
+        log_quality_stats: bool,
     ) -> io.NodeOutput:
         m = model.clone()
         transformer_options = m.model_options.setdefault("transformer_options", {})
@@ -438,6 +442,7 @@ class HybridTaylorAttentionBackend(io.ComfyNode):
                 eps,
                 force_fp32,
                 log_steps,
+                log_quality_stats,
             )
             callback_key = "hybrid_taylor_attention"
             m.remove_callbacks_with_key(patcher_extension.CallbacksMP.ON_PRE_RUN, callback_key)

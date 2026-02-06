@@ -30,3 +30,4 @@
 - Hybrid attention now patches both `flux.math` and `flux.layers` attention bindings via model pre-run/cleanup callbacks.
 - Model-level callbacks must be registered on `ModelPatcher` (transformer_options callbacks are not invoked by pre-run/cleanup).
 - Hybrid PCA now falls back to an identity projection when too few samples are available to fit a low-rank basis.
+- Hybrid attention can optionally aggregate hybrid-vs-exact quality stats across steps and log once at cleanup.
