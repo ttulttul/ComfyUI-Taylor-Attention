@@ -40,3 +40,4 @@
 - Hybrid quality stats logs now include the active hybrid config parameters for reproducibility.
 - Hybrid quality stats now append to `output/hybrid-attention-results.jsonl` including config and inferred meta (sigma, shapes, latent resolution where possible).
 - Added ClockedSweepValues node for distributing test values evenly across a clock list.
+- ClockedSweepValues accepts a single integer string to generate a 1..N clock and can infer clock length from values if left blank.

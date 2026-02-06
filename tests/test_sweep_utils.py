@@ -26,6 +26,18 @@ def test_parse_clock_and_values_from_string():
     assert values == [0.1, 0.2]
 
 
+def test_parse_clock_integer_string():
+    clock, values = sweep_utils.parse_clock_and_values("3", "0.1, 0.2")
+    assert clock == [1.0, 2.0, 3.0]
+    assert values == [0.1, 0.2]
+
+
+def test_infer_clock_from_values():
+    clock, values = sweep_utils.parse_clock_and_values("", "0.1, 0.2, 0.3")
+    assert clock == [1.0, 2.0, 3.0]
+    assert values == [0.1, 0.2, 0.3]
+
+
 def test_parse_rejects_long_values():
     with pytest.raises(ValueError):
         sweep_utils.build_clocked_sweep([0.0], [1.0, 2.0])

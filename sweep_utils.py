@@ -20,6 +20,11 @@ def _to_float_list(value, name: str) -> list[float]:
         text = value.strip()
         if not text:
             return []
+        if text.isdigit():
+            count = int(text)
+            if count <= 0:
+                return []
+            return [float(i + 1) for i in range(count)]
         if text.startswith("["):
             try:
                 parsed = json.loads(text)
@@ -58,4 +63,6 @@ def build_clocked_sweep(clock: Sequence[float], values: Sequence[float]) -> list
 def parse_clock_and_values(clock_input, values_input) -> tuple[list[float], list[float]]:
     clock = _to_float_list(clock_input, "clock")
     values = _to_float_list(values_input, "values")
+    if not clock and values:
+        clock = [float(i + 1) for i in range(len(values))]
     return clock, values
