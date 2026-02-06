@@ -22,6 +22,10 @@ _QUALITY_SAMPLES = 8
 class HybridAttentionConfig:
     enabled: bool = True
     local_window: int = 512
+    local_window_min: int = 512
+    local_window_max: int = 512
+    local_window_sigma_low: float = 0.0
+    local_window_sigma_high: float = 0.0
     local_chunk: int = 256
     prefix_tokens: int = 0
     global_dim: int = 16
@@ -79,6 +83,20 @@ def _compute_global_weight(cfg: HybridAttentionConfig, sigma: Optional[float]) -
     if sigma >= cfg.global_sigma_high:
         return cfg.global_weight
     return cfg.global_weight * (sigma - cfg.global_sigma_low) / (cfg.global_sigma_high - cfg.global_sigma_low)
+
+
+def _compute_local_window(cfg: HybridAttentionConfig, sigma: Optional[float]) -> int:
+    if sigma is None:
+        return int(cfg.local_window)
+    if cfg.local_window_sigma_high <= cfg.local_window_sigma_low or cfg.local_window_sigma_high <= 0:
+        return int(cfg.local_window)
+    if sigma <= cfg.local_window_sigma_low:
+        return max(0, int(cfg.local_window_min))
+    if sigma >= cfg.local_window_sigma_high:
+        return max(0, int(cfg.local_window_max))
+    t = (sigma - cfg.local_window_sigma_low) / (cfg.local_window_sigma_high - cfg.local_window_sigma_low)
+    window = cfg.local_window_min + (cfg.local_window_max - cfg.local_window_min) * t
+    return max(0, int(round(window)))
 
 
 def _slice_mask(mask: torch.Tensor, q_start: int, q_end: int, k_start: int, k_end: int) -> torch.Tensor:
@@ -372,6 +390,7 @@ def hybrid_attention(q, k, v, pe, mask=None, transformer_options=None):
         q_rope, k_rope = q, k
 
     heads = q.shape[1]
+    effective_window = _compute_local_window(cfg, sigma)
     local_out = _local_attention(
         q_rope,
         k_rope,
@@ -379,7 +398,7 @@ def hybrid_attention(q, k, v, pe, mask=None, transformer_options=None):
         heads,
         mask,
         transformer_options,
-        cfg.local_window,
+        effective_window,
         cfg.local_chunk,
         cfg.prefix_tokens,
     )
@@ -390,7 +409,7 @@ def hybrid_attention(q, k, v, pe, mask=None, transformer_options=None):
             logger.info(
                 "Hybrid attention: sigma=%s local_window=%s prefix_tokens=%s global_weight=0 (global skipped)",
                 sigma,
-                cfg.local_window,
+                effective_window,
                 cfg.prefix_tokens,
             )
         return local_out
@@ -419,7 +438,7 @@ def hybrid_attention(q, k, v, pe, mask=None, transformer_options=None):
         logger.info(
             "Hybrid attention: sigma=%s local_window=%s prefix_tokens=%s global_dim=%s global_P=%s global_weight=%.3g",
             sigma,
-            cfg.local_window,
+            effective_window,
             cfg.prefix_tokens,
             cfg.global_dim,
             cfg.global_P,
@@ -491,8 +510,12 @@ def pre_run_callback(patcher):
         _reset_quality_stats()
     if cfg.get("log_steps", False):
         logger.info(
-            "Hybrid attention pre-run: enabled local_window=%s prefix_tokens=%s global_dim=%s global_P=%s global_weight=%.3g",
+            "Hybrid attention pre-run: enabled local_window=%s window_min=%s window_max=%s window_sigma=[%s,%s] prefix_tokens=%s global_dim=%s global_P=%s global_weight=%.3g",
             cfg.get("local_window"),
+            cfg.get("local_window_min"),
+            cfg.get("local_window_max"),
+            cfg.get("local_window_sigma_low"),
+            cfg.get("local_window_sigma_high"),
             cfg.get("prefix_tokens"),
             cfg.get("global_dim"),
             cfg.get("global_P"),

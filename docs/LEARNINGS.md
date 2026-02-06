@@ -32,3 +32,4 @@
 - Hybrid PCA now falls back to an identity projection when too few samples are available to fit a low-rank basis.
 - Hybrid attention can optionally aggregate hybrid-vs-exact quality stats across steps and log once at cleanup.
 - PCA projection cache now keys by dtype to avoid bf16/float32 matmul mismatches when force_fp32 is disabled.
+- Hybrid local window can be scheduled by sigma (min/max + sigma low/high) to use full attention early and windowed attention later.

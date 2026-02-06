@@ -15,6 +15,23 @@ def test_hybrid_config_quality_flag():
     assert cfg.log_quality_stats is True
 
 
+def test_compute_local_window_schedule():
+    cfg = hybrid_attention._resolve_config(
+        {
+            "enabled": True,
+            "local_window": 256,
+            "local_window_min": 128,
+            "local_window_max": 0,
+            "local_window_sigma_low": 0.5,
+            "local_window_sigma_high": 1.0,
+        }
+    )
+    assert hybrid_attention._compute_local_window(cfg, 0.4) == 128
+    assert hybrid_attention._compute_local_window(cfg, 1.0) == 0
+    mid = hybrid_attention._compute_local_window(cfg, 0.75)
+    assert 0 < mid < 128
+
+
 def test_hybrid_global_weight_ramp():
     cfg = hybrid_attention._resolve_config({"enabled": True, "global_weight": 1.0, "global_sigma_low": 0.2, "global_sigma_high": 0.6})
     assert hybrid_attention._compute_global_weight(cfg, 0.1) == 0.0
