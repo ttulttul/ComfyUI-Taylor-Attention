@@ -29,3 +29,4 @@
 - Added a hybrid local/global attention node that patches Flux attention to combine local RoPE attention with a global low-dim Taylor approximation.
 - Hybrid attention now patches both `flux.math` and `flux.layers` attention bindings via model pre-run/cleanup callbacks.
 - Model-level callbacks must be registered on `ModelPatcher` (transformer_options callbacks are not invoked by pre-run/cleanup).
+- Hybrid PCA now falls back to an identity projection when too few samples are available to fit a low-rank basis.

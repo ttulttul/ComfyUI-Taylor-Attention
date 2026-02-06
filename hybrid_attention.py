@@ -93,6 +93,7 @@ def _slice_mask(mask: torch.Tensor, q_start: int, q_end: int, k_start: int, k_en
 def _project_pca(q: torch.Tensor, k: torch.Tensor, d_low: int, samples: int) -> torch.Tensor:
     device = q.device
     dim = q.shape[-1]
+    d_low = min(d_low, dim)
     key = (device, dim, d_low)
     cached = _PCA_CACHE.get(key)
     if cached is not None:
@@ -103,6 +104,15 @@ def _project_pca(q: torch.Tensor, k: torch.Tensor, d_low: int, samples: int) -> 
     if samples > 0 and flat.shape[0] > samples:
         idx = torch.randperm(flat.shape[0], device=flat.device)[:samples]
         flat = flat[idx]
+    if flat.shape[0] < d_low or flat.shape[0] < 2:
+        proj = torch.eye(dim, device=device, dtype=q.dtype)[:, :d_low]
+        _PCA_CACHE[key] = proj
+        logger.warning(
+            "Hybrid attention PCA fallback: only %d samples for d_low=%d; using identity projection.",
+            flat.shape[0],
+            d_low,
+        )
+        return proj
     flat = flat.float()
     flat = flat - flat.mean(dim=0, keepdim=True)
     _, _, v = torch.pca_lowrank(flat, q=d_low, center=False)
