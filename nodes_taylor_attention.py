@@ -532,10 +532,95 @@ class ClockedSweepValues(io.ComfyNode):
         return io.NodeOutput(output)
 
 
+class Combinations(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="Combinations",
+            display_name="Combinations",
+            category="advanced/scheduling",
+            description="Generate repeated lists that cover all combinations of provided values.",
+            inputs=[
+                io.MultiType.Input(
+                    io.String.Input(
+                        "a",
+                        multiline=True,
+                        placeholder="1, 2, 3",
+                        tooltip="Values for A (JSON list, comma/space-separated, or list input).",
+                    ),
+                    [io.AnyType],
+                ),
+                io.MultiType.Input(
+                    io.String.Input(
+                        "b",
+                        multiline=True,
+                        placeholder="4, 5",
+                        tooltip="Values for B (optional).",
+                    ),
+                    [io.AnyType],
+                    optional=True,
+                ),
+                io.MultiType.Input(
+                    io.String.Input(
+                        "c",
+                        multiline=True,
+                        placeholder="",
+                        tooltip="Values for C (optional).",
+                    ),
+                    [io.AnyType],
+                    optional=True,
+                ),
+                io.MultiType.Input(
+                    io.String.Input(
+                        "d",
+                        multiline=True,
+                        placeholder="",
+                        tooltip="Values for D (optional).",
+                    ),
+                    [io.AnyType],
+                    optional=True,
+                ),
+            ],
+            outputs=[
+                io.AnyType.Output("a_out"),
+                io.AnyType.Output("b_out"),
+                io.AnyType.Output("c_out"),
+                io.AnyType.Output("d_out"),
+            ],
+            is_experimental=True,
+        )
+
+    @classmethod
+    def execute(cls, a, b=None, c=None, d=None) -> io.NodeOutput:
+        values = []
+        names = []
+        a_list = sweep_utils.to_float_list(a, "a")
+        if not a_list:
+            raise ValueError("Combinations: 'a' must contain at least one value.")
+        values.append(a_list)
+        names.append("a")
+        for label, item in (("b", b), ("c", c), ("d", d)):
+            if item is None or item == "":
+                continue
+            parsed = sweep_utils.to_float_list(item, label)
+            if parsed:
+                values.append(parsed)
+                names.append(label)
+
+        outputs = sweep_utils.build_combinations(values)
+        out_map = dict(zip(names, outputs))
+        return io.NodeOutput(
+            out_map.get("a", []),
+            out_map.get("b", []),
+            out_map.get("c", []),
+            out_map.get("d", []),
+        )
+
+
 class TaylorAttentionExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [TaylorAttentionBackend, HybridTaylorAttentionBackend, ClockedSweepValues]
+        return [TaylorAttentionBackend, HybridTaylorAttentionBackend, ClockedSweepValues, Combinations]
 
 
 async def comfy_entrypoint() -> TaylorAttentionExtension:
