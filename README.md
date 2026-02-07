@@ -186,6 +186,8 @@ Speed tips:
 - During online distillation, Flux2TTR logs progress every 10 training updates with current loss so you can tune `steps`.
 - If you only want fastest distillation and don't need visual feedback, set `training_preview_ttr=false` to stay in teacher passthrough during training runs.
 - `comet_api_key` can be left blank to use the `COMET_API_KEY` environment variable.
+- This repo now declares `comet-ml` in `pyproject.toml`, but ComfyUI runs in its own venv. Install it there too:
+  - `source ~/git/ComfyUI/.venv/bin/activate && pip install comet-ml`
 
 ## Clocked Sweep Values
 
