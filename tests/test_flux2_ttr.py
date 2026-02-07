@@ -124,6 +124,8 @@ def test_runtime_training_uses_query_subsampling_only():
     assert sample.q_sub.shape[2] == 4
     assert sample.k_full.shape[2] == 10
     assert sample.v_full.shape[2] == 10
+    assert sample.k_full.device.type == "cpu"
+    assert sample.k_full.dtype == torch.float16
 
 
 def test_runtime_training_preview_uses_student_when_layer_ready():
@@ -457,6 +459,37 @@ def test_memory_reserve_estimate_scales_with_training():
     )
     assert infer_bytes > 0
     assert train_bytes > infer_bytes
+
+
+def test_training_oom_recovery_reduces_pressure_and_clears_layer_buffer():
+    runtime = flux2_ttr.Flux2TTRRuntime(
+        feature_dim=256,
+        learning_rate=1e-3,
+        training=True,
+        steps=4,
+        training_query_token_cap=128,
+        replay_buffer_size=8,
+    )
+    layer_key = "single:0"
+
+    runtime._push_replay_sample(
+        layer_key=layer_key,
+        q_sub=torch.randn(1, 2, 4, 4),
+        k_full=torch.randn(1, 2, 8, 4),
+        v_full=torch.randn(1, 2, 8, 4),
+        teacher_sub=torch.randn(1, 2, 4, 4),
+        key_mask=torch.ones(1, 8, dtype=torch.bool),
+        text_token_count=4,
+    )
+    assert len(runtime.replay_buffers[layer_key]) == 1
+
+    changed = runtime._handle_training_oom(layer_key, torch.device("cpu"))
+    assert changed is True
+    assert runtime.training_query_token_cap <= 64
+    assert runtime.query_chunk_size <= 128
+    assert runtime.key_chunk_size <= 512
+    assert runtime.landmark_count <= 64
+    assert len(runtime.replay_buffers[layer_key]) == 0
 
 
 def test_maybe_reserve_memory_dedupes(monkeypatch):

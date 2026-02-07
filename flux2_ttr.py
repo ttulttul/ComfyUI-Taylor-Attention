@@ -26,8 +26,8 @@ _MAX_SAFE_INFERENCE_LOSS = 0.5
 
 _DEFAULT_Q_CHUNK = 256
 _DEFAULT_K_CHUNK = 1024
-_DEFAULT_TRAIN_QUERY_CAP = 256
-_DEFAULT_REPLAY_BUFFER = 64
+_DEFAULT_TRAIN_QUERY_CAP = 128
+_DEFAULT_REPLAY_BUFFER = 8
 _DEFAULT_TRAIN_STEPS_PER_CALL = 1
 _DEFAULT_HUBER_BETA = 0.05
 _DEFAULT_READY_THRESHOLD = 0.12
@@ -37,6 +37,8 @@ _DEFAULT_PHI_LR_MUL = 1.0
 _DEFAULT_GRAD_CLIP = 1.0
 _DEFAULT_LANDMARK_COUNT = 128
 _DEFAULT_TEXT_TOKENS_GUESS = 77
+_DEFAULT_REPLAY_OFFLOAD_CPU = True
+_DEFAULT_REPLAY_STORAGE_DTYPE = "float16"
 
 try:
     from comfy import model_management
@@ -566,6 +568,8 @@ class Flux2TTRRuntime:
         grad_clip_norm: float = _DEFAULT_GRAD_CLIP,
         readiness_threshold: float = _DEFAULT_READY_THRESHOLD,
         readiness_min_updates: int = _DEFAULT_READY_MIN_UPDATES,
+        replay_offload_cpu: bool = _DEFAULT_REPLAY_OFFLOAD_CPU,
+        replay_storage_dtype: str = _DEFAULT_REPLAY_STORAGE_DTYPE,
         enable_memory_reserve: bool = False,
         layer_start: int = -1,
         layer_end: int = -1,
@@ -601,6 +605,15 @@ class Flux2TTRRuntime:
         self.grad_clip_norm = max(0.0, float(grad_clip_norm))
         self.readiness_threshold = float(readiness_threshold)
         self.readiness_min_updates = max(0, int(readiness_min_updates))
+        self.replay_offload_cpu = bool(replay_offload_cpu)
+        self.replay_storage_dtype = str(replay_storage_dtype or _DEFAULT_REPLAY_STORAGE_DTYPE).strip().lower()
+        if self.replay_storage_dtype not in ("float32", "float16", "bfloat16"):
+            logger.warning(
+                "Flux2TTR: unsupported replay_storage_dtype=%r; using %r.",
+                self.replay_storage_dtype,
+                _DEFAULT_REPLAY_STORAGE_DTYPE,
+            )
+            self.replay_storage_dtype = _DEFAULT_REPLAY_STORAGE_DTYPE
         self.enable_memory_reserve = bool(enable_memory_reserve)
 
         self.layer_start = int(layer_start)
@@ -769,6 +782,13 @@ class Flux2TTRRuntime:
                     state[key] = value.to(device=device, dtype=target_dtype)
                 else:
                     state[key] = value.to(device=device)
+
+    def _replay_dtype(self) -> torch.dtype:
+        if self.replay_storage_dtype == "float32":
+            return torch.float32
+        if self.replay_storage_dtype == "bfloat16":
+            return torch.bfloat16
+        return torch.float16
 
     @staticmethod
     def _ensure_layer_device(layer: Flux2HKRAttnLayer, device: torch.device) -> None:
@@ -1020,15 +1040,70 @@ class Flux2TTRRuntime:
         text_token_count: Optional[int],
     ) -> None:
         buf = self.replay_buffers.setdefault(layer_key, deque(maxlen=self.replay_buffer_size))
+        store_device = torch.device("cpu") if self.replay_offload_cpu else q_sub.device
+        replay_dtype = self._replay_dtype()
+
+        def _pack(x: torch.Tensor) -> torch.Tensor:
+            y = x.detach()
+            if torch.is_floating_point(y):
+                y = y.to(dtype=replay_dtype)
+            return y.to(device=store_device)
+
         sample = ReplaySample(
-            q_sub=q_sub.detach(),
-            k_full=k_full.detach(),
-            v_full=v_full.detach(),
-            teacher_sub=teacher_sub.detach(),
-            key_mask=key_mask.detach() if key_mask is not None else None,
+            q_sub=_pack(q_sub),
+            k_full=_pack(k_full),
+            v_full=_pack(v_full),
+            teacher_sub=_pack(teacher_sub),
+            key_mask=(key_mask.detach().to(device=store_device) if key_mask is not None else None),
             text_token_count=text_token_count,
         )
         buf.append(sample)
+
+    def _handle_training_oom(self, layer_key: str, device: torch.device) -> bool:
+        old_q_cap = self.training_query_token_cap
+        old_q_chunk = self.query_chunk_size
+        old_k_chunk = self.key_chunk_size
+        old_landmarks = self.landmark_count
+
+        changed = False
+        if self.training_query_token_cap > 32:
+            self.training_query_token_cap = max(32, self.training_query_token_cap // 2)
+            changed = True
+        if self.query_chunk_size > 64:
+            self.query_chunk_size = max(64, self.query_chunk_size // 2)
+            changed = True
+        if self.key_chunk_size > 256:
+            self.key_chunk_size = max(256, self.key_chunk_size // 2)
+            changed = True
+        if self.landmark_count > 32:
+            self.landmark_count = max(32, self.landmark_count // 2)
+            changed = True
+
+        layer_buf = self.replay_buffers.get(layer_key)
+        if layer_buf is not None and len(layer_buf) > 0:
+            layer_buf.clear()
+            changed = True
+
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        if changed:
+            logger.warning(
+                (
+                    "Flux2TTR OOM recovery on %s: training_query_token_cap %d->%d, "
+                    "q_chunk %d->%d, k_chunk %d->%d, landmarks %d->%d; cleared layer replay buffer."
+                ),
+                layer_key,
+                old_q_cap,
+                self.training_query_token_cap,
+                old_q_chunk,
+                self.query_chunk_size,
+                old_k_chunk,
+                self.key_chunk_size,
+                old_landmarks,
+                self.landmark_count,
+            )
+        return changed
 
     def _train_from_replay(self, layer_key: str, head_dim: int, device: torch.device) -> None:
         if not self.training_enabled or self.steps_remaining <= 0:
@@ -1047,11 +1122,11 @@ class Flux2TTRRuntime:
         steps = min(self.train_steps_per_call, self.steps_remaining)
         for _ in range(steps):
             sample = random.choice(tuple(buf))
-            q_sub = sample.q_sub.float().clone()
-            k_full = sample.k_full.float().clone()
-            v_full = sample.v_full.float().clone()
-            teacher_sub = sample.teacher_sub.float().clone()
-            key_mask = sample.key_mask
+            q_sub = sample.q_sub.to(device=device, dtype=torch.float32).clone()
+            k_full = sample.k_full.to(device=device, dtype=torch.float32).clone()
+            v_full = sample.v_full.to(device=device, dtype=torch.float32).clone()
+            teacher_sub = sample.teacher_sub.to(device=device, dtype=torch.float32).clone()
+            key_mask = sample.key_mask.to(device=device) if sample.key_mask is not None else None
 
             student_sub = layer(
                 q=q_sub,
@@ -1163,49 +1238,49 @@ class Flux2TTRRuntime:
 
         if self.training_mode:
             if self.training_enabled and self.steps_remaining > 0:
-                if self.enable_memory_reserve:
-                    _maybe_reserve_memory(
-                    self,
-                    q_eff,
-                    k_eff,
-                    transformer_options,
-                    training=True,
-                    dtype_accum=torch.float32,
-                    layer_key=layer_key,
+                try:
+                    if self.enable_memory_reserve:
+                        _maybe_reserve_memory(
+                            self,
+                            q_eff,
+                            k_eff,
+                            transformer_options,
+                            training=True,
+                            dtype_accum=torch.float32,
+                            layer_key=layer_key,
+                        )
+
+                    teacher_bhnd = _unflatten_heads(teacher_out, q.shape[1], q.shape[3]).float().clone()
+                    q_train = q_eff.float().clone()
+                    k_train = k_eff.float().clone()
+                    v_train = v.float().clone()
+
+                    idx_q = self._select_training_query_indices(q_train.shape[2], q_train.device)
+                    if idx_q is not None:
+                        q_sub = q_train[:, :, idx_q, :]
+                        teacher_sub = teacher_bhnd[:, :, idx_q, :]
+                    else:
+                        q_sub = q_train
+                        teacher_sub = teacher_bhnd
+
+                    self._push_replay_sample(
+                        layer_key=layer_key,
+                        q_sub=q_sub,
+                        k_full=k_train,
+                        v_full=v_train,
+                        teacher_sub=teacher_sub,
+                        key_mask=key_mask,
+                        text_token_count=text_token_count,
                     )
 
-                teacher_bhnd = _unflatten_heads(teacher_out, q.shape[1], q.shape[3]).float().clone()
-                q_train = q_eff.float().clone()
-                k_train = k_eff.float().clone()
-                v_train = v.float().clone()
-
-                idx_q = self._select_training_query_indices(q_train.shape[2], q_train.device)
-                if idx_q is not None:
-                    q_sub = q_train[:, :, idx_q, :]
-                    teacher_sub = teacher_bhnd[:, :, idx_q, :]
-                else:
-                    q_sub = q_train
-                    teacher_sub = teacher_bhnd
-
-                self._push_replay_sample(
-                    layer_key=layer_key,
-                    q_sub=q_sub,
-                    k_full=k_train,
-                    v_full=v_train,
-                    teacher_sub=teacher_sub,
-                    key_mask=key_mask,
-                    text_token_count=text_token_count,
-                )
-
-                try:
                     with torch.inference_mode(False):
                         with torch.enable_grad():
                             self._train_from_replay(layer_key, head_dim, q_eff.device)
                 except torch.OutOfMemoryError:
-                    self.training_enabled = False
-                    logger.warning("Flux2TTR training OOM on layer %s; disabling training for this run.", layer_key)
-                    if q_eff.device.type == "cuda":
-                        torch.cuda.empty_cache()
+                    recovered = self._handle_training_oom(layer_key, q_eff.device)
+                    if not recovered:
+                        self.training_enabled = False
+                        logger.warning("Flux2TTR training OOM on layer %s; disabling training for this run.", layer_key)
 
                 if isinstance(transformer_options, dict):
                     cfg = transformer_options.get("flux2_ttr")
@@ -1350,6 +1425,8 @@ class Flux2TTRRuntime:
             "phi_lr_multiplier": self.phi_lr_multiplier,
             "training_query_token_cap": self.training_query_token_cap,
             "replay_buffer_size": self.replay_buffer_size,
+            "replay_offload_cpu": self.replay_offload_cpu,
+            "replay_storage_dtype": self.replay_storage_dtype,
             "train_steps_per_call": self.train_steps_per_call,
             "huber_beta": self.huber_beta,
             "grad_clip_norm": self.grad_clip_norm,
@@ -1413,6 +1490,10 @@ class Flux2TTRRuntime:
 
         self.training_query_token_cap = max(1, int(payload.get("training_query_token_cap", self.training_query_token_cap)))
         self.replay_buffer_size = max(1, int(payload.get("replay_buffer_size", self.replay_buffer_size)))
+        self.replay_offload_cpu = bool(payload.get("replay_offload_cpu", self.replay_offload_cpu))
+        self.replay_storage_dtype = str(payload.get("replay_storage_dtype", self.replay_storage_dtype)).strip().lower()
+        if self.replay_storage_dtype not in ("float32", "float16", "bfloat16"):
+            self.replay_storage_dtype = _DEFAULT_REPLAY_STORAGE_DTYPE
         self.train_steps_per_call = max(1, int(payload.get("train_steps_per_call", self.train_steps_per_call)))
         self.huber_beta = max(1e-6, float(payload.get("huber_beta", self.huber_beta)))
         self.grad_clip_norm = max(0.0, float(payload.get("grad_clip_norm", self.grad_clip_norm)))
@@ -1491,6 +1572,8 @@ def _recover_runtime_from_config(cfg: dict) -> Optional[Flux2TTRRuntime]:
         phi_lr_multiplier=float(cfg.get("phi_lr_multiplier", _DEFAULT_PHI_LR_MUL)),
         training_query_token_cap=int(cfg.get("training_query_token_cap", _DEFAULT_TRAIN_QUERY_CAP)),
         replay_buffer_size=int(cfg.get("replay_buffer_size", _DEFAULT_REPLAY_BUFFER)),
+        replay_offload_cpu=bool(cfg.get("replay_offload_cpu", _DEFAULT_REPLAY_OFFLOAD_CPU)),
+        replay_storage_dtype=str(cfg.get("replay_storage_dtype", _DEFAULT_REPLAY_STORAGE_DTYPE)),
         train_steps_per_call=int(cfg.get("train_steps_per_call", _DEFAULT_TRAIN_STEPS_PER_CALL)),
         huber_beta=float(cfg.get("huber_beta", _DEFAULT_HUBER_BETA)),
         grad_clip_norm=float(cfg.get("grad_clip_norm", _DEFAULT_GRAD_CLIP)),

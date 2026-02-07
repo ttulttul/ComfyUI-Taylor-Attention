@@ -170,7 +170,9 @@ Speed tips:
 - Distill once, then run with `training=false` for normal sampling.
 - Keep `feature_dim=256` unless quality demands a higher value.
 - Start with `query_chunk_size=256`, `key_chunk_size=1024`; tune upward for speed if VRAM allows.
-- Keep `training_query_token_cap` in the `64-256` range for practical replay memory during online distillation.
+- Keep `training_query_token_cap` in the `64-256` range for practical replay memory during online distillation (`128` default).
+- `replay_buffer_size` now defaults to `8` (instead of large buffers) to keep VRAM stable during online training.
+- Replay samples are offloaded to CPU in reduced precision by default, then moved back to GPU per optimization step.
 - Use `layer_start` / `layer_end` to patch only late single blocks as a cheap quality/speed tradeoff.
 - Keep `inference_mixed_precision=true` on CUDA for the fastest inference path.
 - Flux2TTR now asks ComfyUI to reserve VRAM ahead of each TTR call (Taylor-style `free_memory` reservation) using a `1.1x` safety factor over estimated need.
@@ -178,6 +180,7 @@ Speed tips:
 - Note: this reservation is advisory/offload-oriented (via `free_memory`), not a persistent allocation; Flux2TTR now releases runtime GPU state and unregisters runtime objects at cleanup to avoid VRAM buildup across repeated runs.
 - If a cached graph references a missing Flux2TTR runtime ID, the node now attempts to recover runtime state from its saved config + `checkpoint_path` instead of immediately falling back.
 - Training at `feature_dim=256` typically needs roughly a few GB of extra VRAM; reservation is intended to offload earlier nodes before HKR allocations.
+- If training hits OOM, Flux2TTR now auto-reduces training pressure (`training_query_token_cap`, chunk sizes, landmarks) and clears the active layer replay buffer before disabling training.
 - If training still OOMs, Flux2TTR disables training for the run and falls back gracefully (teacher passthrough or preview fallback) instead of crashing generation.
 - If checkpoint loss is still high, Flux2TTR will fail closed to native attention fallback in inference mode instead of emitting low-quality garbage output.
 - During online distillation, Flux2TTR logs progress every 10 training updates with current loss so you can tune `steps`.
