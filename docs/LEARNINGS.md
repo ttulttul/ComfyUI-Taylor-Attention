@@ -58,3 +58,6 @@
 - Flux2TTR online distillation often needs hundreds of updates for usable loss; setting the node default to 512 steps is a better starting point than 32.
 - Training-mode preview is useful for qualitative monitoring, but it adds another student forward pass; keep it optional so distillation-only runs can stay in teacher passthrough for speed.
 - Distillation quality is better tracked with multiple per-layer metrics (NMSE, cosine similarity, norm/mean/std ratios, p95/p99 error tails, sampled attention KL/top-k overlap) and streamed to Comet each update for long-run monitoring.
+- Flux2TTR quality/stability improved substantially after replacing bidirectional scan TTR with a normalized kernel-regression attention core plus a small landmark softmax residual; this preserves query-dependent normalization while keeping linear-time memory.
+- For online distillation, subsampling only queries (while keeping full keys/values) is critical; replay-buffer training on `(q_sub, k_full, v_full, teacher_sub)` is markedly more learnable than subsampling q/k/v together.
+- Per-layer EMA readiness gates are essential for fail-closed inference: layers should stay on native teacher attention until enough updates are seen and EMA loss is below threshold.

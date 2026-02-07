@@ -130,49 +130,53 @@ The `HybridTaylorAttentionBackend` node patches Flux's attention function at run
 
 ## Flux2TTR (Distilled TTR Attention)
 
-The `Flux2TTR` node adds a train/load workflow for replacing Flux single-block attention with bidirectional TTR layers.
+The `Flux2TTR` node now uses a **hybrid kernel-regression attention** replacement for Flux single blocks:
+
+- Branch A: normalized kernel regression attention (positive feature map, fp32 KV/Ksum accumulation, chunked by query/key).
+- Branch B: exact softmax residual over a small landmark set (learnable gate `alpha`).
+- Final output: `kernel_out + alpha * landmark_out`.
 
 - Inputs:
   - `model` (`MODEL`)
-  - `latents` (`LATENT`) and `conditioning` (`CONDITIONING`) for calibration data
+  - `latents` (`LATENT`) and `conditioning` (`CONDITIONING`) (kept for workflow compatibility; calibration now uses real runtime capture mode)
   - `learning_rate`, `steps` (default `512`)
   - `training` toggle
   - `training_preview_ttr` (when training, emit student/TTR output for preview instead of teacher passthrough)
   - `comet_enabled`, `comet_project_name`, `comet_workspace`, `comet_api_key` (optional Comet telemetry)
   - `checkpoint_path`
   - `feature_dim` (must be a multiple of 256 and at least 128)
-  - `scan_chunk_size` (token chunk size for the vectorized scan path)
+  - `query_chunk_size`, `key_chunk_size`
+  - `landmark_count`, `text_tokens_guess`
+  - `alpha_init`, `alpha_lr_multiplier`, `phi_lr_multiplier`
+  - `training_query_token_cap`, `replay_buffer_size`, `train_steps_per_call`
+  - `huber_beta`, `grad_clip_norm`
+  - `readiness_threshold`, `readiness_min_updates`
   - `layer_start` / `layer_end` (optional single-block index range to patch)
   - `inference_mixed_precision` (use bf16/fp16 inference path on CUDA)
 - Outputs:
-  - patched `MODEL` with Flux attention routed through TTR modules
-  - `loss_value` from calibration/load state
+  - patched `MODEL` with Flux attention routed through per-layer HKR student modules
+  - `loss_value` from load/runtime state
 
 Behavior:
-- `training=true`: runs online distillation during the sampler run using native Flux attention as the teacher (`MSE(student, native_attention)`), and automatically saves to `checkpoint_path` at model cleanup when provided. By default it also previews student/TTR outputs during training (`training_preview_ttr=true`).
-- `training=false`: loads TTR weights from `checkpoint_path` and enables inference with TTR attention.
-- During model execution, Flux attention is patched on pre-run and restored on cleanup; single-block calls route to per-layer `TTRFluxLayer` instances keyed by `block_index`.
-- Inference uses a chunked vectorized scan instead of token-by-token Python loops for better throughput.
-- When Comet logging is enabled, Flux2TTR logs per-layer distillation metrics each update:
-  - `loss`, `nmse`, `cosine_similarity`, `norm_ratio`, `mean_ratio`, `std_ratio`
-  - `p95_abs_error`, `p99_abs_error`
-  - sampled attention-map agreement `attn_kl_div` and `attn_topk_overlap`
-  - plus running averages (`avg_*`) per layer
+- `training=true`: runs online distillation during sampler execution, with **query-only subsampling** (`q_sub`) and **full k/v context** for student forward passes. Samples are stored in per-layer replay buffers and optimized with Smooth-L1/Huber loss.
+- `training=false`: loads checkpointed HKR layers and uses student attention only for layers that pass readiness checks.
+- Readiness is tracked per layer via EMA loss + minimum update count. Layers that are not ready fall back to native Flux attention.
+- Unsupported full per-query masks (`[B,H,Nq,Nk]` style) explicitly fail closed to native attention.
+- During model execution, Flux attention is patched on pre-run and restored on cleanup; single-block calls route to per-layer `Flux2HKRAttnLayer` instances keyed by `block_index`.
+- Checkpoint format is `flux2_ttr_v2` and stores layer weights plus readiness/EMA metadata for fail-closed inference.
+- When Comet logging is enabled, Flux2TTR logs per-layer distillation metrics (loss/mse/nmse/cosine/ema/ready) each update.
 
 Speed tips:
 - Distill once, then run with `training=false` for normal sampling.
 - Keep `feature_dim=256` unless quality demands a higher value.
-- Start `scan_chunk_size` around `128`; raise it for speed if VRAM allows, lower it if memory spikes.
-- For `training=true`, Flux2TTR now caps the effective scan chunk size to `64` by default to avoid large fp32 training spikes.
-- Online distillation now trains on a capped token subset (`128` tokens by default) to keep per-call training memory bounded.
+- Start with `query_chunk_size=256`, `key_chunk_size=1024`; tune upward for speed if VRAM allows.
+- Keep `training_query_token_cap` in the `64-256` range for practical replay memory during online distillation.
 - Use `layer_start` / `layer_end` to patch only late single blocks as a cheap quality/speed tradeoff.
 - Keep `inference_mixed_precision=true` on CUDA for the fastest inference path.
 - Flux2TTR now asks ComfyUI to reserve VRAM ahead of each TTR call (Taylor-style `free_memory` reservation) using a `1.1x` safety factor over estimated need.
 - Note: this reservation is advisory/offload-oriented (via `free_memory`), not a persistent allocation; Flux2TTR now releases runtime GPU state and unregisters runtime objects at cleanup to avoid VRAM buildup across repeated runs.
 - If a cached graph references a missing Flux2TTR runtime ID, the node now attempts to recover runtime state from its saved config + `checkpoint_path` instead of immediately falling back.
-- Training at `feature_dim=256` typically needs roughly a few GB of extra VRAM; reservation is intended to offload earlier nodes before TTR allocates.
-- If a scan chunk still OOMs, Flux2TTR automatically retries with smaller chunk sizes (`512 -> 256 -> 128 -> ...`) until it fits.
-- Flux2TTR now remembers smaller per-layer chunk sizes after OOM retries so it does not repeat the same failing chunk each call.
+- Training at `feature_dim=256` typically needs roughly a few GB of extra VRAM; reservation is intended to offload earlier nodes before HKR allocations.
 - If training still OOMs, Flux2TTR disables training for the run and falls back gracefully (teacher passthrough or preview fallback) instead of crashing generation.
 - If checkpoint loss is still high, Flux2TTR will fail closed to native attention fallback in inference mode instead of emitting low-quality garbage output.
 - During online distillation, Flux2TTR logs progress every 10 training updates with current loss so you can tune `steps`.
