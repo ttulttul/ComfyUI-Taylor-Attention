@@ -355,20 +355,26 @@ class Flux2TTRRuntime:
         head_dim = spec.head_dim if spec else int(q_eff.shape[-1])
         layer = self._ensure_layer(layer_key, head_dim, q_eff.device)
 
-        q_in = q_eff.float()
-        k_in = k_eff.float()
-        v_in = v.float()
-        student = layer(q_in, k_in, v_in)
-        student_out = _flatten_heads(student).to(dtype=v.dtype)
-
         if self.training_enabled and self.steps_remaining > 0:
-            teacher_out = self._teacher_from_fallback(fallback_attention, q, k, v, pe, mask, transformer_options)
-            teacher = teacher_out.view(q.shape[0], q.shape[2], q.shape[1], q.shape[3]).permute(0, 2, 1, 3).float()
-            loss = torch.nn.functional.mse_loss(student, teacher)
-            optimizer = self.optimizers[layer_key]
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
+            layer.train()
+            with torch.inference_mode(False):
+                with torch.enable_grad():
+                    q_in = q_eff.float()
+                    k_in = k_eff.float()
+                    v_in = v.float()
+                    student = layer(q_in, k_in, v_in)
+                    with torch.no_grad():
+                        teacher_out = self._teacher_from_fallback(fallback_attention, q, k, v, pe, mask, transformer_options)
+                        teacher = (
+                            teacher_out.view(q.shape[0], q.shape[2], q.shape[1], q.shape[3])
+                            .permute(0, 2, 1, 3)
+                            .float()
+                        )
+                    loss = torch.nn.functional.mse_loss(student, teacher)
+                    optimizer = self.optimizers[layer_key]
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    optimizer.step()
 
             self.last_loss = float(loss.item())
             self.steps_remaining -= 1
@@ -377,6 +383,12 @@ class Flux2TTRRuntime:
                 logger.info("Flux2TTR: online distillation complete; inference mode enabled.")
             return teacher_out
 
+        layer.eval()
+        q_in = q_eff.float()
+        k_in = k_eff.float()
+        v_in = v.float()
+        student = layer(q_in, k_in, v_in)
+        student_out = _flatten_heads(student).to(dtype=v.dtype)
         return student_out
 
     def calibrate_from_inputs(
@@ -433,43 +445,46 @@ class Flux2TTRRuntime:
             token_features.shape[1],
         )
 
-        for step_idx in range(train_steps):
-            layer_key = layer_order[step_idx % len(layer_order)]
-            spec = self.layer_specs[layer_key]
-            out_dim = spec.num_heads * spec.head_dim
-            q_proj, k_proj, v_proj = self._ensure_projection(layer_key, token_features.shape[-1], out_dim, token_features.device)
+        with torch.inference_mode(False):
+            with torch.enable_grad():
+                for step_idx in range(train_steps):
+                    layer_key = layer_order[step_idx % len(layer_order)]
+                    spec = self.layer_specs[layer_key]
+                    out_dim = spec.num_heads * spec.head_dim
+                    q_proj, k_proj, v_proj = self._ensure_projection(layer_key, token_features.shape[-1], out_dim, token_features.device)
 
-            q_flat = torch.tanh(token_features @ q_proj)
-            k_flat = torch.tanh(token_features @ k_proj)
-            v_flat = token_features @ v_proj
+                    q_flat = torch.tanh(token_features @ q_proj)
+                    k_flat = torch.tanh(token_features @ k_proj)
+                    v_flat = token_features @ v_proj
 
-            q_seq = q_flat.view(batch, q_flat.shape[1], spec.num_heads, spec.head_dim).permute(0, 2, 1, 3)
-            k_seq = k_flat.view(batch, k_flat.shape[1], spec.num_heads, spec.head_dim).permute(0, 2, 1, 3)
-            v_seq = v_flat.view(batch, v_flat.shape[1], spec.num_heads, spec.head_dim).permute(0, 2, 1, 3)
+                    q_seq = q_flat.view(batch, q_flat.shape[1], spec.num_heads, spec.head_dim).permute(0, 2, 1, 3)
+                    k_seq = k_flat.view(batch, k_flat.shape[1], spec.num_heads, spec.head_dim).permute(0, 2, 1, 3)
+                    v_seq = v_flat.view(batch, v_flat.shape[1], spec.num_heads, spec.head_dim).permute(0, 2, 1, 3)
 
-            q_seq = q_seq / (torch.norm(q_seq, dim=-1, keepdim=True) + 1e-6)
-            k_seq = k_seq / (torch.norm(k_seq, dim=-1, keepdim=True) + 1e-6)
+                    q_seq = q_seq / (torch.norm(q_seq, dim=-1, keepdim=True) + 1e-6)
+                    k_seq = k_seq / (torch.norm(k_seq, dim=-1, keepdim=True) + 1e-6)
 
-            layer = self._ensure_layer(layer_key, spec.head_dim, token_features.device)
-            with torch.no_grad():
-                teacher = _softmax_attention(q_seq, k_seq, v_seq, mask=None)
-            student = layer(q_seq, k_seq, v_seq)
-            loss = torch.nn.functional.mse_loss(student, teacher)
+                    layer = self._ensure_layer(layer_key, spec.head_dim, token_features.device)
+                    layer.train()
+                    with torch.no_grad():
+                        teacher = _softmax_attention(q_seq, k_seq, v_seq, mask=None)
+                    student = layer(q_seq, k_seq, v_seq)
+                    loss = torch.nn.functional.mse_loss(student, teacher)
 
-            optimizer = self.optimizers[layer_key]
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
+                    optimizer = self.optimizers[layer_key]
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    optimizer.step()
 
-            self.last_loss = float(loss.item())
-            if step_idx == 0 or (step_idx + 1) % max(1, train_steps // 5) == 0 or step_idx + 1 == train_steps:
-                logger.info(
-                    "Flux2TTR calibration step %d/%d layer=%s loss=%.6g",
-                    step_idx + 1,
-                    train_steps,
-                    layer_key,
-                    self.last_loss,
-                )
+                    self.last_loss = float(loss.item())
+                    if step_idx == 0 or (step_idx + 1) % max(1, train_steps // 5) == 0 or step_idx + 1 == train_steps:
+                        logger.info(
+                            "Flux2TTR calibration step %d/%d layer=%s loss=%.6g",
+                            step_idx + 1,
+                            train_steps,
+                            layer_key,
+                            self.last_loss,
+                        )
 
         self.training_enabled = False
         self.steps_remaining = 0

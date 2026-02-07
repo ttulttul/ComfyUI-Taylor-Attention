@@ -106,3 +106,18 @@ def test_runtime_checkpoint_round_trip(tmp_path):
     assert runtime_loaded.pending_state
     assert "single:0" in runtime_loaded.pending_state
     assert not math.isnan(runtime_loaded.last_loss)
+
+
+def test_calibration_works_inside_inference_mode():
+    torch.manual_seed(0)
+    runtime = flux2_ttr.Flux2TTRRuntime(feature_dim=256, learning_rate=1e-3, training=True, steps=2)
+    patcher = _DummyPatcher()
+    latents = {"samples": torch.randn(1, 4, 8, 8)}
+    conditioning = [[torch.randn(1, 8, 32), {"pooled_output": torch.randn(1, 16)}]]
+
+    with torch.inference_mode():
+        loss = runtime.calibrate_from_inputs(patcher, latents, conditioning, steps=2, max_tokens=16)
+
+    assert isinstance(loss, float)
+    assert runtime.layers
+    assert not math.isnan(runtime.last_loss)
