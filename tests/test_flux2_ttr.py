@@ -1,5 +1,7 @@
 import math
 import logging
+import sys
+import types
 
 import pytest
 import torch
@@ -418,6 +420,94 @@ def test_training_progress_logs_every_10_updates(caplog):
 
     assert runtime.training_updates_done == 10
     assert "Flux2TTR distill progress: updates=10/10" in caplog.text
+
+
+def test_compute_distill_metrics_contains_requested_fields():
+    torch.manual_seed(0)
+    runtime = flux2_ttr.Flux2TTRRuntime(feature_dim=256, learning_rate=1e-3, training=True, steps=1)
+    q = torch.randn(1, 2, 12, 4)
+    k = torch.randn(1, 2, 12, 4)
+    v = torch.randn(1, 2, 12, 4)
+    teacher = flux2_ttr._softmax_attention(q.float(), k.float(), v.float())
+    student = teacher + 0.05 * torch.randn_like(teacher)
+    loss = torch.nn.functional.mse_loss(student, teacher)
+
+    metrics = runtime._compute_distill_metrics(
+        student=student,
+        teacher=teacher,
+        q=q,
+        k=k,
+        v=v,
+        mask=None,
+        loss_value=float(loss.item()),
+    )
+
+    expected_keys = {
+        "loss",
+        "nmse",
+        "cosine_similarity",
+        "norm_ratio",
+        "mean_ratio",
+        "std_ratio",
+        "p95_abs_error",
+        "p99_abs_error",
+        "attn_kl_div",
+        "attn_topk_overlap",
+    }
+    assert expected_keys.issubset(metrics.keys())
+    for key in expected_keys:
+        assert math.isfinite(float(metrics[key]))
+    assert 0.0 <= float(metrics["attn_topk_overlap"]) <= 1.0
+
+
+def test_record_training_metrics_logs_to_comet(monkeypatch):
+    start_calls = []
+    metric_calls = []
+    params_calls = []
+
+    class _FakeExperiment:
+        def log_parameters(self, params):
+            params_calls.append(dict(params))
+
+        def log_metrics(self, metrics, step=None):
+            metric_calls.append((dict(metrics), int(step) if step is not None else None))
+
+        def end(self):
+            return None
+
+    def _fake_start(api_key, project_name, workspace):
+        start_calls.append((api_key, project_name, workspace))
+        return _FakeExperiment()
+
+    fake_comet = types.ModuleType("comet_ml")
+    fake_comet.start = _fake_start
+    monkeypatch.setitem(sys.modules, "comet_ml", fake_comet)
+
+    runtime = flux2_ttr.Flux2TTRRuntime(
+        feature_dim=256,
+        learning_rate=1e-3,
+        training=True,
+        steps=10,
+        comet_enabled=True,
+        comet_api_key="test-key",
+        comet_project_name="proj",
+        comet_workspace="ws",
+    )
+    runtime.training_updates_done = 3
+    runtime.steps_remaining = 7
+    runtime._record_training_metrics("single:10", {"loss": 1.0, "nmse": 2.0})
+
+    assert start_calls == [("test-key", "proj", "ws")]
+    assert len(params_calls) == 1
+    assert metric_calls
+    payload, step = metric_calls[-1]
+    assert step == 3
+    assert payload["flux2ttr/single:10/loss"] == 1.0
+    assert payload["flux2ttr/single:10/nmse"] == 2.0
+    assert payload["flux2ttr/single:10/avg_loss"] == 1.0
+    assert payload["flux2ttr/single:10/avg_nmse"] == 2.0
+    assert payload["flux2ttr/global/steps_remaining"] == 7.0
+    assert payload["flux2ttr/global/updates_done"] == 3.0
 
 
 def test_runtime_checkpoint_round_trip(tmp_path):

@@ -21,6 +21,10 @@ _TRAINING_SCAN_CHUNK_CAP = 64
 _EMPIRICAL_TRAINING_FLOOR_BYTES = 3 * 1024 * 1024 * 1024
 _TRAINING_TOKEN_CAP = 128
 _MAX_SAFE_INFERENCE_LOSS = 0.5
+_DISTILL_METRIC_EPS = 1e-8
+_ATTN_METRIC_QUERY_SAMPLES = 16
+_ATTN_METRIC_KEY_SAMPLES = 64
+_ATTN_METRIC_TOPK = 8
 
 try:
     from comfy import model_management
@@ -392,6 +396,10 @@ class Flux2TTRRuntime:
         layer_end: int = -1,
         inference_mixed_precision: bool = True,
         training_preview_ttr: bool = True,
+        comet_enabled: bool = False,
+        comet_api_key: str = "",
+        comet_project_name: str = "ttr-distillation",
+        comet_workspace: str = "ken-simpson",
     ):
         self.feature_dim = validate_feature_dim(feature_dim)
         self.learning_rate = float(learning_rate)
@@ -408,6 +416,10 @@ class Flux2TTRRuntime:
         self.layer_end = int(layer_end)
         self.inference_mixed_precision = bool(inference_mixed_precision)
         self.training_preview_ttr = bool(training_preview_ttr)
+        self.comet_enabled = bool(comet_enabled)
+        self.comet_api_key = str(comet_api_key or "")
+        self.comet_project_name = str(comet_project_name or "ttr-distillation")
+        self.comet_workspace = str(comet_workspace or "ken-simpson")
         self.max_safe_inference_loss = float(_MAX_SAFE_INFERENCE_LOSS)
         self.last_loss = float("nan")
         self.layers: Dict[str, TTRFluxLayer] = {}
@@ -417,9 +429,21 @@ class Flux2TTRRuntime:
         self._projection_cache: Dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
         self._scan_chunk_override_train: Dict[str, int] = {}
         self._scan_chunk_override_infer: Dict[str, int] = {}
+        self._layer_metric_latest: Dict[str, Dict[str, float]] = {}
+        self._layer_metric_running: Dict[str, Dict[str, float]] = {}
+        self._layer_metric_count: Dict[str, int] = {}
+        self._comet_experiment = None
+        self._comet_disabled = False
         self._warned_high_loss = False
 
     def release_resources(self) -> None:
+        if self._comet_experiment is not None:
+            try:
+                self._comet_experiment.end()
+            except Exception as exc:
+                logger.warning("Flux2TTR: failed to end Comet experiment cleanly: %s", exc)
+            self._comet_experiment = None
+
         for layer in self.layers.values():
             try:
                 layer.to(device="cpu")
@@ -437,6 +461,9 @@ class Flux2TTRRuntime:
         self._projection_cache.clear()
         self._scan_chunk_override_train.clear()
         self._scan_chunk_override_infer.clear()
+        self._layer_metric_latest.clear()
+        self._layer_metric_running.clear()
+        self._layer_metric_count.clear()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -535,6 +562,193 @@ class Flux2TTRRuntime:
             .round()
             .to(dtype=torch.long)
         )
+
+    @staticmethod
+    def _sample_even_indices(length: int, max_count: int, device: torch.device) -> torch.Tensor:
+        size = max(1, min(int(max_count), int(length)))
+        if size >= length:
+            return torch.arange(length, device=device, dtype=torch.long)
+        return (
+            torch.linspace(0, length - 1, steps=size, device=device, dtype=torch.float32)
+            .round()
+            .to(dtype=torch.long)
+        )
+
+    def _compute_attention_alignment_metrics(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        student: torch.Tensor,
+        mask: Optional[torch.Tensor],
+    ) -> Dict[str, float]:
+        q_idx = self._sample_even_indices(q.shape[2], _ATTN_METRIC_QUERY_SAMPLES, q.device)
+        k_idx = self._sample_even_indices(k.shape[2], _ATTN_METRIC_KEY_SAMPLES, k.device)
+
+        q_sub = q[:, :, q_idx, :].float()
+        k_sub = k[:, :, k_idx, :].float()
+        v_sub = v[:, :, k_idx, :].float()
+        student_sub = student[:, :, q_idx, :].float()
+
+        key_mask = _key_mask_from_mask(mask, q.shape[0], k.shape[2])
+        if key_mask is not None:
+            key_mask = key_mask[:, k_idx]
+            # Avoid all-masked rows causing all -inf softmax.
+            if not bool(key_mask.any(dim=-1).all()):
+                key_mask = None
+
+        scale = q_sub.shape[-1] ** -0.5
+        teacher_scores = torch.einsum("b h i d, b h j d -> b h i j", q_sub, k_sub) * scale
+        if key_mask is not None:
+            teacher_scores = teacher_scores.masked_fill(~key_mask[:, None, None, :].to(device=teacher_scores.device), float("-inf"))
+        teacher_probs = torch.softmax(teacher_scores, dim=-1)
+
+        # Student does not expose explicit attention maps; induce weights by
+        # scoring student outputs against value vectors on sampled keys.
+        student_scores = torch.einsum("b h i d, b h j d -> b h i j", student_sub, v_sub)
+        if key_mask is not None:
+            student_scores = student_scores.masked_fill(~key_mask[:, None, None, :].to(device=student_scores.device), float("-inf"))
+        student_probs = torch.softmax(student_scores, dim=-1)
+
+        kl = (
+            teacher_probs
+            * ((teacher_probs + _DISTILL_METRIC_EPS).log() - (student_probs + _DISTILL_METRIC_EPS).log())
+        ).sum(dim=-1).mean()
+
+        topk = max(1, min(_ATTN_METRIC_TOPK, teacher_probs.shape[-1]))
+        teacher_topk = torch.topk(teacher_probs, k=topk, dim=-1).indices
+        student_topk = torch.topk(student_probs, k=topk, dim=-1).indices
+        overlap = (teacher_topk[..., :, None] == student_topk[..., None, :]).any(dim=-1).float().mean()
+
+        return {
+            "attn_kl_div": float(kl.item()),
+            "attn_topk_overlap": float(overlap.item()),
+        }
+
+    def _compute_distill_metrics(
+        self,
+        student: torch.Tensor,
+        teacher: torch.Tensor,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        mask: Optional[torch.Tensor],
+        loss_value: float,
+    ) -> Dict[str, float]:
+        diff = (student - teacher).float()
+        teacher_f = teacher.float()
+        student_f = student.float()
+        mse = float(loss_value)
+        teacher_power = float(torch.mean(teacher_f.square()).item())
+        nmse = mse / (teacher_power + _DISTILL_METRIC_EPS)
+
+        student_flat = student_f.reshape(student_f.shape[0], -1)
+        teacher_flat = teacher_f.reshape(teacher_f.shape[0], -1)
+        cosine = torch.nn.functional.cosine_similarity(
+            student_flat,
+            teacher_flat,
+            dim=1,
+            eps=_DISTILL_METRIC_EPS,
+        ).mean()
+        student_norm = torch.linalg.vector_norm(student_flat, dim=1).mean()
+        teacher_norm = torch.linalg.vector_norm(teacher_flat, dim=1).mean()
+        norm_ratio = student_norm / (teacher_norm + _DISTILL_METRIC_EPS)
+        mean_ratio = student_f.mean() / (teacher_f.mean() + _DISTILL_METRIC_EPS)
+        std_ratio = student_f.std(unbiased=False) / (teacher_f.std(unbiased=False) + _DISTILL_METRIC_EPS)
+
+        abs_err = diff.abs().reshape(-1)
+        p95_abs_err = torch.quantile(abs_err, 0.95)
+        p99_abs_err = torch.quantile(abs_err, 0.99)
+
+        metrics = {
+            "loss": mse,
+            "nmse": float(nmse),
+            "cosine_similarity": float(cosine.item()),
+            "norm_ratio": float(norm_ratio.item()),
+            "mean_ratio": float(mean_ratio.item()),
+            "std_ratio": float(std_ratio.item()),
+            "p95_abs_error": float(p95_abs_err.item()),
+            "p99_abs_error": float(p99_abs_err.item()),
+        }
+        metrics.update(self._compute_attention_alignment_metrics(q=q, k=k, v=v, student=student, mask=mask))
+        return metrics
+
+    def _ensure_comet_experiment(self):
+        if not self.comet_enabled or self._comet_disabled:
+            return None
+        if self._comet_experiment is not None:
+            return self._comet_experiment
+
+        api_key = self.comet_api_key.strip() or os.getenv("COMET_API_KEY", "").strip()
+        if not api_key:
+            logger.warning("Flux2TTR: Comet logging enabled but no API key configured; disabling Comet logging.")
+            self._comet_disabled = True
+            return None
+        try:
+            from comet_ml import start
+        except Exception as exc:
+            logger.warning("Flux2TTR: could not import comet_ml; disabling Comet logging (%s).", exc)
+            self._comet_disabled = True
+            return None
+
+        try:
+            experiment = start(
+                api_key=api_key,
+                project_name=self.comet_project_name,
+                workspace=self.comet_workspace,
+            )
+            experiment.log_parameters(
+                {
+                    "learning_rate": float(self.learning_rate),
+                    "steps": int(self.training_steps_total),
+                    "feature_dim": int(self.feature_dim),
+                    "scan_chunk_size": int(self.scan_chunk_size),
+                    "training_scan_chunk_size": int(self.training_scan_chunk_size),
+                    "training_token_cap": int(self.training_token_cap),
+                    "layer_start": int(self.layer_start),
+                    "layer_end": int(self.layer_end),
+                    "inference_mixed_precision": bool(self.inference_mixed_precision),
+                    "training_preview_ttr": bool(self.training_preview_ttr),
+                    "max_safe_inference_loss": float(self.max_safe_inference_loss),
+                }
+            )
+            self._comet_experiment = experiment
+            logger.info(
+                "Flux2TTR: Comet logging enabled (project=%s workspace=%s).",
+                self.comet_project_name,
+                self.comet_workspace,
+            )
+            return experiment
+        except Exception as exc:
+            logger.warning("Flux2TTR: failed to start Comet experiment; disabling Comet logging (%s).", exc)
+            self._comet_disabled = True
+            return None
+
+    def _record_training_metrics(self, layer_key: str, metrics: Dict[str, float]) -> None:
+        self._layer_metric_latest[layer_key] = dict(metrics)
+
+        count = int(self._layer_metric_count.get(layer_key, 0)) + 1
+        self._layer_metric_count[layer_key] = count
+        running = self._layer_metric_running.setdefault(layer_key, {})
+        for key, value in metrics.items():
+            prev = running.get(key, float(value))
+            running[key] = float(prev + (float(value) - prev) / count)
+
+        experiment = self._ensure_comet_experiment()
+        if experiment is None:
+            return
+        payload = {}
+        for key, value in metrics.items():
+            payload[f"flux2ttr/{layer_key}/{key}"] = float(value)
+        for key, value in running.items():
+            payload[f"flux2ttr/{layer_key}/avg_{key}"] = float(value)
+        payload["flux2ttr/global/steps_remaining"] = float(self.steps_remaining)
+        payload["flux2ttr/global/updates_done"] = float(self.training_updates_done)
+        try:
+            experiment.log_metrics(payload, step=int(self.training_updates_done))
+        except Exception as exc:
+            logger.warning("Flux2TTR: Comet metric logging failed; disabling Comet logging (%s).", exc)
+            self._comet_disabled = True
 
     def _is_single_block_selected(self, transformer_options: Optional[dict]) -> bool:
         if transformer_options is None:
@@ -721,9 +935,24 @@ class Flux2TTRRuntime:
                             optimizer.zero_grad(set_to_none=True)
                             loss.backward()
                             optimizer.step()
+                            with torch.no_grad():
+                                try:
+                                    metrics = self._compute_distill_metrics(
+                                        student=student.detach(),
+                                        teacher=teacher.detach(),
+                                        q=q_in.detach(),
+                                        k=k_in.detach(),
+                                        v=v_in.detach(),
+                                        mask=mask,
+                                        loss_value=float(loss.item()),
+                                    )
+                                except Exception as metric_exc:
+                                    logger.warning("Flux2TTR: failed to compute distill metrics for %s: %s", layer_key, metric_exc)
+                                    metrics = {"loss": float(loss.item())}
                     self.last_loss = float(loss.item())
                     self.steps_remaining -= 1
                     self.training_updates_done += 1
+                    self._record_training_metrics(layer_key, metrics)
                     if (
                         self.training_log_every > 0
                         and (
@@ -731,11 +960,24 @@ class Flux2TTRRuntime:
                             or self.steps_remaining <= 0
                         )
                     ):
+                        current = self._layer_metric_latest.get(layer_key, {})
                         logger.info(
-                            "Flux2TTR distill progress: updates=%d/%d loss=%.6g layer=%s remaining=%d",
+                            (
+                                "Flux2TTR distill progress: updates=%d/%d loss=%.6g nmse=%.6g "
+                                "cos=%.6g norm_ratio=%.6g std_ratio=%.6g p95=%.6g p99=%.6g "
+                                "attn_kl=%.6g topk=%.6g layer=%s remaining=%d"
+                            ),
                             self.training_updates_done,
                             max(self.training_steps_total, self.training_updates_done),
                             self.last_loss,
+                            float(current.get("nmse", float("nan"))),
+                            float(current.get("cosine_similarity", float("nan"))),
+                            float(current.get("norm_ratio", float("nan"))),
+                            float(current.get("std_ratio", float("nan"))),
+                            float(current.get("p95_abs_error", float("nan"))),
+                            float(current.get("p99_abs_error", float("nan"))),
+                            float(current.get("attn_kl_div", float("nan"))),
+                            float(current.get("attn_topk_overlap", float("nan"))),
                             layer_key,
                             self.steps_remaining,
                         )
@@ -916,6 +1158,9 @@ class Flux2TTRRuntime:
             "learning_rate": self.learning_rate,
             "training_mode": self.training_mode,
             "training_preview_ttr": self.training_preview_ttr,
+            "comet_enabled": self.comet_enabled,
+            "comet_project_name": self.comet_project_name,
+            "comet_workspace": self.comet_workspace,
             "last_loss": self.last_loss,
             "scan_chunk_size": self.scan_chunk_size,
             "training_scan_chunk_size": self.training_scan_chunk_size,
@@ -955,6 +1200,9 @@ class Flux2TTRRuntime:
         self.learning_rate = float(payload.get("learning_rate", self.learning_rate))
         self.training_mode = bool(payload.get("training_mode", self.training_mode))
         self.training_preview_ttr = bool(payload.get("training_preview_ttr", self.training_preview_ttr))
+        self.comet_enabled = bool(payload.get("comet_enabled", self.comet_enabled))
+        self.comet_project_name = str(payload.get("comet_project_name", self.comet_project_name))
+        self.comet_workspace = str(payload.get("comet_workspace", self.comet_workspace))
         self.last_loss = float(payload.get("last_loss", self.last_loss))
         self.scan_chunk_size = max(1, int(payload.get("scan_chunk_size", self.scan_chunk_size)))
         self.training_scan_chunk_size = max(
@@ -1011,6 +1259,9 @@ def _recover_runtime_from_config(cfg: dict) -> Optional[Flux2TTRRuntime]:
     layer_end = int(cfg.get("layer_end", -1))
     inference_mixed_precision = bool(cfg.get("inference_mixed_precision", True))
     training_preview_ttr = bool(cfg.get("training_preview_ttr", True))
+    comet_enabled = bool(cfg.get("comet_enabled", False))
+    comet_project_name = str(cfg.get("comet_project_name", "ttr-distillation"))
+    comet_workspace = str(cfg.get("comet_workspace", "ken-simpson"))
     training_mode = bool(cfg.get("training_mode", False))
     training_total = max(0, int(cfg.get("training_steps_total", 0)))
     training_remaining = max(0, int(cfg.get("training_steps_remaining", training_total)))
@@ -1026,6 +1277,9 @@ def _recover_runtime_from_config(cfg: dict) -> Optional[Flux2TTRRuntime]:
         layer_end=layer_end,
         inference_mixed_precision=inference_mixed_precision,
         training_preview_ttr=training_preview_ttr,
+        comet_enabled=comet_enabled,
+        comet_project_name=comet_project_name,
+        comet_workspace=comet_workspace,
     )
     runtime.training_mode = training_mode
     runtime.training_preview_ttr = training_preview_ttr
@@ -1039,6 +1293,9 @@ def _recover_runtime_from_config(cfg: dict) -> Optional[Flux2TTRRuntime]:
         runtime.load_checkpoint(checkpoint_path)
         runtime.training_mode = training_mode
         runtime.training_preview_ttr = training_preview_ttr
+        runtime.comet_enabled = comet_enabled
+        runtime.comet_project_name = comet_project_name
+        runtime.comet_workspace = comet_workspace
     elif not training_mode:
         logger.warning(
             "Flux2TTR: cannot recover inference runtime without a valid checkpoint_path (got %r).",

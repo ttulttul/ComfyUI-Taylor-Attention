@@ -510,6 +510,29 @@ class Flux2TTR(io.ComfyNode):
                     default=True,
                     tooltip="When training, output TTR student attention for visual preview instead of teacher passthrough.",
                 ),
+                io.Boolean.Input(
+                    "comet_enabled",
+                    default=True,
+                    tooltip="Log per-layer distillation metrics to Comet during training.",
+                ),
+                io.String.Input(
+                    "comet_project_name",
+                    default="ttr-distillation",
+                    multiline=False,
+                    tooltip="Comet project name used when metric logging is enabled.",
+                ),
+                io.String.Input(
+                    "comet_workspace",
+                    default="ken-simpson",
+                    multiline=False,
+                    tooltip="Comet workspace used when metric logging is enabled.",
+                ),
+                io.String.Input(
+                    "comet_api_key",
+                    default="",
+                    multiline=False,
+                    tooltip="Optional Comet API key override. Leave blank to use COMET_API_KEY env var.",
+                ),
                 io.String.Input(
                     "checkpoint_path",
                     default="",
@@ -568,6 +591,10 @@ class Flux2TTR(io.ComfyNode):
         steps: int,
         training: bool,
         training_preview_ttr: bool,
+        comet_enabled: bool,
+        comet_project_name: str,
+        comet_workspace: str,
+        comet_api_key: str,
         checkpoint_path: str,
         feature_dim: int,
         scan_chunk_size: int,
@@ -598,6 +625,10 @@ class Flux2TTR(io.ComfyNode):
             layer_end=int(layer_end),
             inference_mixed_precision=bool(inference_mixed_precision),
             training_preview_ttr=bool(training_preview_ttr),
+            comet_enabled=bool(comet_enabled),
+            comet_project_name=str(comet_project_name or "ttr-distillation"),
+            comet_workspace=str(comet_workspace or "ken-simpson"),
+            comet_api_key=str(comet_api_key or ""),
         )
         runtime.register_layer_specs(flux2_ttr.infer_flux_single_layer_specs(m))
 
@@ -631,6 +662,9 @@ class Flux2TTR(io.ComfyNode):
             "training": runtime.training_enabled,
             "training_mode": runtime.training_mode,
             "training_preview_ttr": runtime.training_preview_ttr,
+            "comet_enabled": runtime.comet_enabled,
+            "comet_project_name": runtime.comet_project_name,
+            "comet_workspace": runtime.comet_workspace,
             "training_steps_total": int(runtime.training_steps_total),
             "training_steps_remaining": int(runtime.steps_remaining),
             "learning_rate": float(learning_rate),
@@ -658,9 +692,10 @@ class Flux2TTR(io.ComfyNode):
         )
 
         logger.info(
-            "Flux2TTR configured: training_mode=%s training_preview_ttr=%s training_steps=%d feature_dim=%d scan_chunk_size=%d layer_range=[%d,%d] mixed_precision=%s checkpoint=%s loss=%.6g",
+            "Flux2TTR configured: training_mode=%s training_preview_ttr=%s comet_enabled=%s training_steps=%d feature_dim=%d scan_chunk_size=%d layer_range=[%d,%d] mixed_precision=%s checkpoint=%s loss=%.6g",
             training,
             bool(training_preview_ttr),
+            bool(comet_enabled),
             train_steps,
             feature_dim,
             int(scan_chunk_size),

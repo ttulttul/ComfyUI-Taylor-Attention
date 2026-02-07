@@ -138,6 +138,7 @@ The `Flux2TTR` node adds a train/load workflow for replacing Flux single-block a
   - `learning_rate`, `steps` (default `512`)
   - `training` toggle
   - `training_preview_ttr` (when training, emit student/TTR output for preview instead of teacher passthrough)
+  - `comet_enabled`, `comet_project_name`, `comet_workspace`, `comet_api_key` (optional Comet telemetry)
   - `checkpoint_path`
   - `feature_dim` (must be a multiple of 256 and at least 128)
   - `scan_chunk_size` (token chunk size for the vectorized scan path)
@@ -152,6 +153,11 @@ Behavior:
 - `training=false`: loads TTR weights from `checkpoint_path` and enables inference with TTR attention.
 - During model execution, Flux attention is patched on pre-run and restored on cleanup; single-block calls route to per-layer `TTRFluxLayer` instances keyed by `block_index`.
 - Inference uses a chunked vectorized scan instead of token-by-token Python loops for better throughput.
+- When Comet logging is enabled, Flux2TTR logs per-layer distillation metrics each update:
+  - `loss`, `nmse`, `cosine_similarity`, `norm_ratio`, `mean_ratio`, `std_ratio`
+  - `p95_abs_error`, `p99_abs_error`
+  - sampled attention-map agreement `attn_kl_div` and `attn_topk_overlap`
+  - plus running averages (`avg_*`) per layer
 
 Speed tips:
 - Distill once, then run with `training=false` for normal sampling.
@@ -171,6 +177,7 @@ Speed tips:
 - If checkpoint loss is still high, Flux2TTR will fail closed to native attention fallback in inference mode instead of emitting low-quality garbage output.
 - During online distillation, Flux2TTR logs progress every 10 training updates with current loss so you can tune `steps`.
 - If you only want fastest distillation and don't need visual feedback, set `training_preview_ttr=false` to stay in teacher passthrough during training runs.
+- `comet_api_key` can be left blank to use the `COMET_API_KEY` environment variable.
 
 ## Clocked Sweep Values
 
