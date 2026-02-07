@@ -63,3 +63,4 @@
 - Per-layer EMA readiness gates are essential for fail-closed inference: layers should stay on native teacher attention until enough updates are seen and EMA loss is below threshold.
 - In Flux2TTR, calling `model_management.free_memory` during attention can trigger downstream CPU/CUDA mismatches on some runs; making memory reservation opt-in (off by default) avoids these device errors.
 - Keeping replay samples on GPU causes rapid VRAM growth in Flux2TTR because each sample includes full `k/v`; offloading replay buffers to CPU (reduced precision) is the practical default for long distillation runs.
+- Per-layer step logs were noisy; aggregate training snapshots (ready layer list + q25–q75 ranges for loss/ema/cosine/nmse across layers) are more actionable during long distillation runs.

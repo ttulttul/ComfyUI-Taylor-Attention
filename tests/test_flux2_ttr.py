@@ -379,7 +379,9 @@ def test_training_progress_logs_every_10_updates(caplog):
         runtime.run_attention(q, k, v, pe=None, mask=None, transformer_options=opts, fallback_attention=fallback)
 
     assert runtime.training_updates_done == 10
-    assert "Flux2TTR distill progress: updates=10/10" in caplog.text
+    assert "Flux2TTR distill snapshot: updates=10/10" in caplog.text
+    assert "q25-q75 loss=" in caplog.text
+    assert "ready_layers=" in caplog.text
 
 
 def test_record_training_metrics_logs_to_comet(monkeypatch):

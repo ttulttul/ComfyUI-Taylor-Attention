@@ -648,6 +648,79 @@ class Flux2TTRRuntime:
         self._comet_disabled = False
         self._warned_high_loss = False
 
+    @staticmethod
+    def _layer_sort_key(layer_key: str) -> tuple[str, int]:
+        if ":" not in layer_key:
+            return (layer_key, -1)
+        prefix, idx = layer_key.split(":", 1)
+        try:
+            return (prefix, int(idx))
+        except Exception:
+            return (prefix, -1)
+
+    @staticmethod
+    def _quartile_range(values: list[float]) -> tuple[float, float]:
+        finite = [float(v) for v in values if math.isfinite(float(v))]
+        if not finite:
+            return (float("nan"), float("nan"))
+        t = torch.tensor(finite, dtype=torch.float32)
+        q = torch.quantile(t, torch.tensor([0.25, 0.75], dtype=torch.float32))
+        return (float(q[0].item()), float(q[1].item()))
+
+    @staticmethod
+    def _format_layer_list(layer_keys: list[str], limit: int = 12) -> str:
+        if not layer_keys:
+            return "-"
+        if len(layer_keys) <= limit:
+            return ",".join(layer_keys)
+        head = max(1, limit // 2)
+        tail = max(1, limit - head)
+        return ",".join(layer_keys[:head] + ["..."] + layer_keys[-tail:])
+
+    def _log_training_snapshot(self) -> None:
+        latest = self._layer_metric_latest
+        if not latest:
+            logger.info(
+                "Flux2TTR distill snapshot: updates=%d/%d remaining=%d tracked_layers=0 ready_layers=0",
+                self.training_updates_done,
+                max(self.training_steps_total, self.training_updates_done),
+                self.steps_remaining,
+            )
+            return
+
+        tracked_layers = sorted(latest.keys(), key=self._layer_sort_key)
+        ready_layers = sorted(
+            [layer_key for layer_key in tracked_layers if bool(self.layer_ready.get(layer_key, False))],
+            key=self._layer_sort_key,
+        )
+
+        loss_q25, loss_q75 = self._quartile_range([latest[k].get("loss", float("nan")) for k in tracked_layers])
+        ema_q25, ema_q75 = self._quartile_range([latest[k].get("ema_loss", float("nan")) for k in tracked_layers])
+        cos_q25, cos_q75 = self._quartile_range([latest[k].get("cosine_similarity", float("nan")) for k in tracked_layers])
+        nmse_q25, nmse_q75 = self._quartile_range([latest[k].get("nmse", float("nan")) for k in tracked_layers])
+
+        logger.info(
+            (
+                "Flux2TTR distill snapshot: updates=%d/%d remaining=%d tracked_layers=%d "
+                "ready_layers=%d ready=[%s] "
+                "q25-q75 loss=%.6g..%.6g ema=%.6g..%.6g cosine=%.6g..%.6g nmse=%.6g..%.6g"
+            ),
+            self.training_updates_done,
+            max(self.training_steps_total, self.training_updates_done),
+            self.steps_remaining,
+            len(tracked_layers),
+            len(ready_layers),
+            self._format_layer_list(ready_layers),
+            loss_q25,
+            loss_q75,
+            ema_q25,
+            ema_q75,
+            cos_q25,
+            cos_q75,
+            nmse_q25,
+            nmse_q75,
+        )
+
     def release_resources(self) -> None:
         if self._comet_experiment is not None:
             try:
@@ -1173,19 +1246,7 @@ class Flux2TTRRuntime:
                     or self.steps_remaining <= 0
                 )
             ):
-                logger.info(
-                    (
-                        "Flux2TTR distill progress: updates=%d/%d layer=%s "
-                        "loss=%.6g ema=%.6g ready=%s remaining=%d"
-                    ),
-                    self.training_updates_done,
-                    max(self.training_steps_total, self.training_updates_done),
-                    layer_key,
-                    loss_value,
-                    float(self.layer_ema_loss.get(layer_key, float("nan"))),
-                    bool(self.layer_ready.get(layer_key, False)),
-                    self.steps_remaining,
-                )
+                self._log_training_snapshot()
 
             if self.steps_remaining <= 0:
                 self.training_enabled = False

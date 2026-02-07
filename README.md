@@ -183,7 +183,7 @@ Speed tips:
 - If training hits OOM, Flux2TTR now auto-reduces training pressure (`training_query_token_cap`, chunk sizes, landmarks) and clears the active layer replay buffer before disabling training.
 - If training still OOMs, Flux2TTR disables training for the run and falls back gracefully (teacher passthrough or preview fallback) instead of crashing generation.
 - If checkpoint loss is still high, Flux2TTR will fail closed to native attention fallback in inference mode instead of emitting low-quality garbage output.
-- During online distillation, Flux2TTR logs progress every 10 training updates with current loss so you can tune `steps`.
+- During online distillation, Flux2TTR logs aggregate snapshots every 10 updates: ready layer list plus q25–q75 ranges for layer `loss`, `ema_loss`, `cosine_similarity`, and `nmse`.
 - If you only want fastest distillation and don't need visual feedback, set `training_preview_ttr=false` to stay in teacher passthrough during training runs.
 - `comet_api_key` can be left blank to use the `COMET_API_KEY` environment variable.
 - This repo now declares `comet-ml` in `pyproject.toml`, but ComfyUI runs in its own venv. Install it there too:
