@@ -165,6 +165,15 @@ def test_effective_scan_chunk_training_cap():
     assert runtime._effective_scan_chunk(training=True) == 64
 
 
+def test_training_token_cap_indices():
+    runtime = flux2_ttr.Flux2TTRRuntime(feature_dim=256, learning_rate=1e-3, training=True, steps=4)
+    idx = runtime._select_training_token_indices(seq_len=1024, device=torch.device("cpu"))
+    assert idx is not None
+    assert idx.numel() == runtime.training_token_cap
+    assert int(idx.min().item()) >= 0
+    assert int(idx.max().item()) <= 1023
+
+
 def test_memory_reserve_estimate_scales_with_training():
     infer_bytes = flux2_ttr._estimate_flux2_ttr_memory_bytes(
         batch=1,
@@ -209,6 +218,32 @@ def test_maybe_reserve_memory_dedupes(monkeypatch):
     flux2_ttr._maybe_reserve_memory(runtime, q, opts, training=False, dtype_accum=torch.float32)
     assert len(calls) == 1
     assert "flux2_ttr_memory_reserved" in opts
+
+
+def test_training_oom_disables_training_and_returns_teacher():
+    torch.manual_seed(0)
+    runtime = flux2_ttr.Flux2TTRRuntime(feature_dim=256, learning_rate=1e-3, training=True, steps=1)
+    runtime.register_layer_specs([flux2_ttr.FluxLayerSpec(layer_key="single:0", num_heads=2, head_dim=4)])
+
+    q = torch.randn(1, 2, 6, 4)
+    k = torch.randn(1, 2, 6, 4)
+    v = torch.randn(1, 2, 6, 4)
+    opts = {"block_type": "single", "block_index": 0}
+
+    def fallback(q_arg, k_arg, v_arg, pe_arg, mask=None, transformer_options=None):
+        del pe_arg, mask, transformer_options
+        return _baseline_flat(q_arg, k_arg, v_arg)
+
+    baseline = fallback(q, k, v, None)
+    layer = runtime._ensure_layer("single:0", 4, q.device)
+
+    def oom_forward(*args, **kwargs):
+        raise torch.OutOfMemoryError("synthetic oom")
+
+    layer.forward = oom_forward  # type: ignore[method-assign]
+    out = runtime.run_attention(q, k, v, pe=None, mask=None, transformer_options=opts, fallback_attention=fallback)
+    assert torch.allclose(out, baseline)
+    assert runtime.training_enabled is False
 
 
 def test_runtime_checkpoint_round_trip(tmp_path):

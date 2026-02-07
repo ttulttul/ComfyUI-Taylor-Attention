@@ -19,6 +19,7 @@ _RUNTIME_REGISTRY: Dict[str, "Flux2TTRRuntime"] = {}
 _MEMORY_RESERVE_FACTOR = 1.1
 _TRAINING_SCAN_CHUNK_CAP = 64
 _EMPIRICAL_TRAINING_FLOOR_BYTES = 3 * 1024 * 1024 * 1024
+_TRAINING_TOKEN_CAP = 128
 
 try:
     from comfy import model_management
@@ -295,6 +296,8 @@ def _maybe_reserve_memory(
         return
 
     batch, heads, seq_len, head_dim = q.shape
+    if training:
+        seq_len = min(seq_len, max(1, int(runtime.training_token_cap)))
     dtype_size = torch.tensor([], dtype=dtype_accum).element_size()
     effective_chunk = runtime._effective_scan_chunk(training)
     mem_bytes = _estimate_flux2_ttr_memory_bytes(
@@ -388,6 +391,7 @@ class Flux2TTRRuntime:
         self.steps_remaining = max(0, int(steps))
         self.scan_chunk_size = max(1, int(scan_chunk_size))
         self.training_scan_chunk_size = max(1, min(self.scan_chunk_size, _TRAINING_SCAN_CHUNK_CAP))
+        self.training_token_cap = int(_TRAINING_TOKEN_CAP)
         self.layer_start = int(layer_start)
         self.layer_end = int(layer_end)
         self.inference_mixed_precision = bool(inference_mixed_precision)
@@ -465,6 +469,16 @@ class Flux2TTRRuntime:
         if training:
             return int(self.training_scan_chunk_size)
         return int(self.scan_chunk_size)
+
+    def _select_training_token_indices(self, seq_len: int, device: torch.device) -> Optional[torch.Tensor]:
+        cap = max(0, int(self.training_token_cap))
+        if cap <= 0 or seq_len <= cap:
+            return None
+        return (
+            torch.linspace(0, seq_len - 1, steps=cap, device=device, dtype=torch.float32)
+            .round()
+            .to(dtype=torch.long)
+        )
 
     def _is_single_block_selected(self, transformer_options: Optional[dict]) -> bool:
         if transformer_options is None:
@@ -564,33 +578,46 @@ class Flux2TTRRuntime:
                 teacher_out = self._teacher_from_fallback(fallback_attention, q, k, v, pe, mask, transformer_options)
             if self.training_enabled and self.steps_remaining > 0:
                 _maybe_reserve_memory(self, q_eff, transformer_options, training=True, dtype_accum=torch.float32)
-                with torch.inference_mode(False):
-                    with torch.enable_grad():
-                        layer = self._ensure_layer(layer_key, head_dim, q_eff.device)
-                        self._set_layer_dtype(layer_key, layer, torch.float32)
-                        layer.train()
-                        # ComfyUI may call us under torch.inference_mode(); clone converts
-                        # inference tensors to normal tensors that autograd can save.
-                        q_in = q_eff.float().clone()
-                        k_in = k_eff.float().clone()
-                        v_in = v.float().clone()
-                        student = layer(q_in, k_in, v_in, chunk_size=self._effective_scan_chunk(training=True))
-                        teacher = (
-                            teacher_out.view(q.shape[0], q.shape[2], q.shape[1], q.shape[3])
-                            .permute(0, 2, 1, 3)
-                            .float()
-                            .clone()
-                        )
-                        loss = torch.nn.functional.mse_loss(student, teacher)
-                        optimizer = self.optimizers[layer_key]
-                        optimizer.zero_grad(set_to_none=True)
-                        loss.backward()
-                        optimizer.step()
-                self.last_loss = float(loss.item())
-                self.steps_remaining -= 1
-                if self.steps_remaining <= 0:
+                try:
+                    with torch.inference_mode(False):
+                        with torch.enable_grad():
+                            layer = self._ensure_layer(layer_key, head_dim, q_eff.device)
+                            self._set_layer_dtype(layer_key, layer, torch.float32)
+                            layer.train()
+                            # ComfyUI may call us under torch.inference_mode(); clone converts
+                            # inference tensors to normal tensors that autograd can save.
+                            q_in = q_eff.float().clone()
+                            k_in = k_eff.float().clone()
+                            v_in = v.float().clone()
+                            teacher = (
+                                teacher_out.view(q.shape[0], q.shape[2], q.shape[1], q.shape[3])
+                                .permute(0, 2, 1, 3)
+                                .float()
+                                .clone()
+                            )
+                            idx = self._select_training_token_indices(q_in.shape[2], q_in.device)
+                            if idx is not None:
+                                q_in = q_in[:, :, idx, :]
+                                k_in = k_in[:, :, idx, :]
+                                v_in = v_in[:, :, idx, :]
+                                teacher = teacher[:, :, idx, :]
+
+                            student = layer(q_in, k_in, v_in, chunk_size=self._effective_scan_chunk(training=True))
+                            loss = torch.nn.functional.mse_loss(student, teacher)
+                            optimizer = self.optimizers[layer_key]
+                            optimizer.zero_grad(set_to_none=True)
+                            loss.backward()
+                            optimizer.step()
+                    self.last_loss = float(loss.item())
+                    self.steps_remaining -= 1
+                    if self.steps_remaining <= 0:
+                        self.training_enabled = False
+                        logger.info("Flux2TTR: online distillation reached configured steps; continuing teacher passthrough for this run.")
+                except torch.OutOfMemoryError:
                     self.training_enabled = False
-                    logger.info("Flux2TTR: online distillation reached configured steps; continuing teacher passthrough for this run.")
+                    logger.warning("Flux2TTR training OOM on layer %s; disabling training and continuing teacher passthrough.", layer_key)
+                    if q_eff.device.type == "cuda":
+                        torch.cuda.empty_cache()
             return teacher_out
 
         layer = self._ensure_layer(layer_key, head_dim, q_eff.device)
@@ -724,6 +751,7 @@ class Flux2TTRRuntime:
             "last_loss": self.last_loss,
             "scan_chunk_size": self.scan_chunk_size,
             "training_scan_chunk_size": self.training_scan_chunk_size,
+            "training_token_cap": self.training_token_cap,
             "layer_start": self.layer_start,
             "layer_end": self.layer_end,
             "inference_mixed_precision": self.inference_mixed_precision,
@@ -766,6 +794,7 @@ class Flux2TTRRuntime:
                 int(payload.get("training_scan_chunk_size", self.training_scan_chunk_size)),
             ),
         )
+        self.training_token_cap = max(1, int(payload.get("training_token_cap", self.training_token_cap)))
         self.layer_start = int(payload.get("layer_start", self.layer_start))
         self.layer_end = int(payload.get("layer_end", self.layer_end))
         self.inference_mixed_precision = bool(payload.get("inference_mixed_precision", self.inference_mixed_precision))
