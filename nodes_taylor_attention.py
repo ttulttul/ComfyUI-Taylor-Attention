@@ -625,6 +625,14 @@ class Flux2TTR(io.ComfyNode):
                     tooltip="Store replay samples on CPU (reduced precision) to reduce VRAM pressure.",
                 ),
                 io.Int.Input(
+                    "replay_max_mb",
+                    default=768,
+                    min=64,
+                    max=65536,
+                    step=1,
+                    tooltip="Global replay memory budget in MB across all layers.",
+                ),
+                io.Int.Input(
                     "train_steps_per_call",
                     default=1,
                     min=1,
@@ -721,6 +729,7 @@ class Flux2TTR(io.ComfyNode):
         training_query_token_cap: int,
         replay_buffer_size: int,
         replay_offload_cpu: bool,
+        replay_max_mb: int,
         train_steps_per_call: int,
         huber_beta: float,
         grad_clip_norm: float,
@@ -759,6 +768,7 @@ class Flux2TTR(io.ComfyNode):
             training_query_token_cap=int(training_query_token_cap),
             replay_buffer_size=int(replay_buffer_size),
             replay_offload_cpu=bool(replay_offload_cpu),
+            replay_max_bytes=int(replay_max_mb) * 1024 * 1024,
             train_steps_per_call=int(train_steps_per_call),
             huber_beta=float(huber_beta),
             grad_clip_norm=float(grad_clip_norm),
@@ -824,6 +834,7 @@ class Flux2TTR(io.ComfyNode):
             "training_query_token_cap": int(training_query_token_cap),
             "replay_buffer_size": int(replay_buffer_size),
             "replay_offload_cpu": bool(replay_offload_cpu),
+            "replay_max_bytes": int(replay_max_mb) * 1024 * 1024,
             "train_steps_per_call": int(train_steps_per_call),
             "huber_beta": float(huber_beta),
             "grad_clip_norm": float(grad_clip_norm),
@@ -855,7 +866,7 @@ class Flux2TTR(io.ComfyNode):
             (
                 "Flux2TTR configured: training_mode=%s training_preview_ttr=%s comet_enabled=%s "
                 "training_steps=%d feature_dim=%d q_chunk=%d k_chunk=%d landmarks=%d "
-                "replay=%d replay_offload_cpu=%s train_steps_per_call=%d readiness=(%.6g,%d) reserve=%s layer_range=[%d,%d] "
+                "replay=%d replay_offload_cpu=%s replay_max_mb=%d train_steps_per_call=%d readiness=(%.6g,%d) reserve=%s layer_range=[%d,%d] "
                 "mixed_precision=%s checkpoint=%s loss=%.6g"
             ),
             training,
@@ -868,6 +879,7 @@ class Flux2TTR(io.ComfyNode):
             int(landmark_count),
             int(replay_buffer_size),
             bool(replay_offload_cpu),
+            int(replay_max_mb),
             int(train_steps_per_call),
             float(readiness_threshold),
             int(readiness_min_updates),

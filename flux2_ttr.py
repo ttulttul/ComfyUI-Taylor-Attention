@@ -39,6 +39,7 @@ _DEFAULT_LANDMARK_COUNT = 128
 _DEFAULT_TEXT_TOKENS_GUESS = 77
 _DEFAULT_REPLAY_OFFLOAD_CPU = True
 _DEFAULT_REPLAY_STORAGE_DTYPE = "float16"
+_DEFAULT_REPLAY_MAX_BYTES = 768 * 1024 * 1024
 
 try:
     from comfy import model_management
@@ -61,6 +62,8 @@ class ReplaySample:
     teacher_sub: torch.Tensor
     key_mask: Optional[torch.Tensor]
     text_token_count: Optional[int]
+    nbytes: int = 0
+    created_step: int = 0
 
 
 def validate_feature_dim(feature_dim: int) -> int:
@@ -570,6 +573,7 @@ class Flux2TTRRuntime:
         readiness_min_updates: int = _DEFAULT_READY_MIN_UPDATES,
         replay_offload_cpu: bool = _DEFAULT_REPLAY_OFFLOAD_CPU,
         replay_storage_dtype: str = _DEFAULT_REPLAY_STORAGE_DTYPE,
+        replay_max_bytes: int = _DEFAULT_REPLAY_MAX_BYTES,
         enable_memory_reserve: bool = False,
         layer_start: int = -1,
         layer_end: int = -1,
@@ -614,6 +618,9 @@ class Flux2TTRRuntime:
                 _DEFAULT_REPLAY_STORAGE_DTYPE,
             )
             self.replay_storage_dtype = _DEFAULT_REPLAY_STORAGE_DTYPE
+        self.replay_max_bytes = max(0, int(replay_max_bytes))
+        self.replay_total_bytes = 0
+        self._replay_created_counter = 0
         self.enable_memory_reserve = bool(enable_memory_reserve)
 
         self.layer_start = int(layer_start)
@@ -681,10 +688,12 @@ class Flux2TTRRuntime:
         latest = self._layer_metric_latest
         if not latest:
             logger.info(
-                "Flux2TTR distill snapshot: updates=%d/%d remaining=%d tracked_layers=0 ready_layers=0",
+                "Flux2TTR distill snapshot: updates=%d/%d remaining=%d tracked_layers=0 ready_layers=0 replay=%.1f/%.1fMB",
                 self.training_updates_done,
                 max(self.training_steps_total, self.training_updates_done),
                 self.steps_remaining,
+                self.replay_total_bytes / (1024.0 * 1024.0),
+                self.replay_max_bytes / (1024.0 * 1024.0),
             )
             return
 
@@ -702,7 +711,7 @@ class Flux2TTRRuntime:
         logger.info(
             (
                 "Flux2TTR distill snapshot: updates=%d/%d remaining=%d tracked_layers=%d "
-                "ready_layers=%d ready=[%s] "
+                "ready_layers=%d ready=[%s] replay=%.1f/%.1fMB "
                 "q25-q75 loss=%.6g..%.6g ema=%.6g..%.6g cosine=%.6g..%.6g nmse=%.6g..%.6g"
             ),
             self.training_updates_done,
@@ -711,6 +720,8 @@ class Flux2TTRRuntime:
             len(tracked_layers),
             len(ready_layers),
             self._format_layer_list(ready_layers),
+            self.replay_total_bytes / (1024.0 * 1024.0),
+            self.replay_max_bytes / (1024.0 * 1024.0),
             loss_q25,
             loss_q75,
             ema_q25,
@@ -746,6 +757,8 @@ class Flux2TTRRuntime:
         self.optimizers.clear()
 
         self.replay_buffers.clear()
+        self.replay_total_bytes = 0
+        self._replay_created_counter = 0
         self._layer_metric_latest.clear()
         self._layer_metric_running.clear()
         self._layer_metric_count.clear()
@@ -818,7 +831,7 @@ class Flux2TTRRuntime:
                     )
             self.layers[layer_key] = layer
             self.optimizers[layer_key] = optimizer
-            self.replay_buffers.setdefault(layer_key, deque(maxlen=self.replay_buffer_size))
+            self.replay_buffers.setdefault(layer_key, deque())
             logger.info(
                 "Flux2TTR: created HKR layer %s (head_dim=%d feature_dim=%d landmarks=%d).",
                 layer_key,
@@ -1102,6 +1115,37 @@ class Flux2TTRRuntime:
 
         return _flatten_heads(student).to(dtype=v.dtype)
 
+    @staticmethod
+    def _sample_tensor_nbytes(x: Optional[torch.Tensor]) -> int:
+        if x is None:
+            return 0
+        return int(x.numel() * x.element_size())
+
+    def _evict_one_oldest_replay_sample(self) -> bool:
+        oldest_layer = None
+        oldest_step = None
+        for layer_key, layer_buf in self.replay_buffers.items():
+            if not layer_buf:
+                continue
+            created = int(layer_buf[0].created_step)
+            if oldest_step is None or created < oldest_step:
+                oldest_step = created
+                oldest_layer = layer_key
+        if oldest_layer is None:
+            return False
+
+        popped = self.replay_buffers[oldest_layer].popleft()
+        self.replay_total_bytes = max(0, self.replay_total_bytes - int(popped.nbytes))
+        return True
+
+    def _evict_replay_until_within_budget(self, incoming_bytes: int = 0) -> None:
+        if self.replay_max_bytes <= 0:
+            return
+        target = self.replay_max_bytes - max(0, int(incoming_bytes))
+        while self.replay_total_bytes > max(0, target):
+            if not self._evict_one_oldest_replay_sample():
+                break
+
     def _push_replay_sample(
         self,
         layer_key: str,
@@ -1112,7 +1156,7 @@ class Flux2TTRRuntime:
         key_mask: Optional[torch.Tensor],
         text_token_count: Optional[int],
     ) -> None:
-        buf = self.replay_buffers.setdefault(layer_key, deque(maxlen=self.replay_buffer_size))
+        buf = self.replay_buffers.setdefault(layer_key, deque())
         store_device = torch.device("cpu") if self.replay_offload_cpu else q_sub.device
         replay_dtype = self._replay_dtype()
 
@@ -1122,15 +1166,40 @@ class Flux2TTRRuntime:
                 y = y.to(dtype=replay_dtype)
             return y.to(device=store_device)
 
+        q_store = _pack(q_sub)
+        k_store = _pack(k_full)
+        v_store = _pack(v_full)
+        teacher_store = _pack(teacher_sub)
+        key_mask_store = key_mask.detach().to(device=store_device) if key_mask is not None else None
+        nbytes = (
+            self._sample_tensor_nbytes(q_store)
+            + self._sample_tensor_nbytes(k_store)
+            + self._sample_tensor_nbytes(v_store)
+            + self._sample_tensor_nbytes(teacher_store)
+            + self._sample_tensor_nbytes(key_mask_store)
+        )
+
+        self._evict_replay_until_within_budget(incoming_bytes=nbytes)
+
+        self._replay_created_counter += 1
         sample = ReplaySample(
-            q_sub=_pack(q_sub),
-            k_full=_pack(k_full),
-            v_full=_pack(v_full),
-            teacher_sub=_pack(teacher_sub),
-            key_mask=(key_mask.detach().to(device=store_device) if key_mask is not None else None),
+            q_sub=q_store,
+            k_full=k_store,
+            v_full=v_store,
+            teacher_sub=teacher_store,
+            key_mask=key_mask_store,
             text_token_count=text_token_count,
+            nbytes=int(nbytes),
+            created_step=int(self._replay_created_counter),
         )
         buf.append(sample)
+        self.replay_total_bytes += int(nbytes)
+
+        while len(buf) > self.replay_buffer_size:
+            popped = buf.popleft()
+            self.replay_total_bytes = max(0, self.replay_total_bytes - int(popped.nbytes))
+
+        self._evict_replay_until_within_budget(incoming_bytes=0)
 
     def _handle_training_oom(self, layer_key: str, device: torch.device) -> bool:
         old_q_cap = self.training_query_token_cap
@@ -1154,7 +1223,9 @@ class Flux2TTRRuntime:
 
         layer_buf = self.replay_buffers.get(layer_key)
         if layer_buf is not None and len(layer_buf) > 0:
+            released = sum(int(s.nbytes) for s in layer_buf)
             layer_buf.clear()
+            self.replay_total_bytes = max(0, self.replay_total_bytes - released)
             changed = True
 
         if device.type == "cuda":
@@ -1488,6 +1559,7 @@ class Flux2TTRRuntime:
             "replay_buffer_size": self.replay_buffer_size,
             "replay_offload_cpu": self.replay_offload_cpu,
             "replay_storage_dtype": self.replay_storage_dtype,
+            "replay_max_bytes": self.replay_max_bytes,
             "train_steps_per_call": self.train_steps_per_call,
             "huber_beta": self.huber_beta,
             "grad_clip_norm": self.grad_clip_norm,
@@ -1555,6 +1627,7 @@ class Flux2TTRRuntime:
         self.replay_storage_dtype = str(payload.get("replay_storage_dtype", self.replay_storage_dtype)).strip().lower()
         if self.replay_storage_dtype not in ("float32", "float16", "bfloat16"):
             self.replay_storage_dtype = _DEFAULT_REPLAY_STORAGE_DTYPE
+        self.replay_max_bytes = max(0, int(payload.get("replay_max_bytes", self.replay_max_bytes)))
         self.train_steps_per_call = max(1, int(payload.get("train_steps_per_call", self.train_steps_per_call)))
         self.huber_beta = max(1e-6, float(payload.get("huber_beta", self.huber_beta)))
         self.grad_clip_norm = max(0.0, float(payload.get("grad_clip_norm", self.grad_clip_norm)))
@@ -1635,6 +1708,7 @@ def _recover_runtime_from_config(cfg: dict) -> Optional[Flux2TTRRuntime]:
         replay_buffer_size=int(cfg.get("replay_buffer_size", _DEFAULT_REPLAY_BUFFER)),
         replay_offload_cpu=bool(cfg.get("replay_offload_cpu", _DEFAULT_REPLAY_OFFLOAD_CPU)),
         replay_storage_dtype=str(cfg.get("replay_storage_dtype", _DEFAULT_REPLAY_STORAGE_DTYPE)),
+        replay_max_bytes=int(cfg.get("replay_max_bytes", _DEFAULT_REPLAY_MAX_BYTES)),
         train_steps_per_call=int(cfg.get("train_steps_per_call", _DEFAULT_TRAIN_STEPS_PER_CALL)),
         huber_beta=float(cfg.get("huber_beta", _DEFAULT_HUBER_BETA)),
         grad_clip_norm=float(cfg.get("grad_clip_norm", _DEFAULT_GRAD_CLIP)),

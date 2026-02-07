@@ -494,6 +494,41 @@ def test_training_oom_recovery_reduces_pressure_and_clears_layer_buffer():
     assert len(runtime.replay_buffers[layer_key]) == 0
 
 
+def test_replay_budget_evicts_old_samples_across_layers():
+    runtime = flux2_ttr.Flux2TTRRuntime(
+        feature_dim=256,
+        learning_rate=1e-3,
+        training=True,
+        steps=4,
+        replay_buffer_size=16,
+        replay_max_bytes=1200,
+        replay_offload_cpu=True,
+        replay_storage_dtype="float32",
+    )
+
+    def push(layer_key: str):
+        runtime._push_replay_sample(
+            layer_key=layer_key,
+            q_sub=torch.randn(1, 1, 4, 4),
+            k_full=torch.randn(1, 1, 16, 4),
+            v_full=torch.randn(1, 1, 16, 4),
+            teacher_sub=torch.randn(1, 1, 4, 4),
+            key_mask=torch.ones(1, 16, dtype=torch.bool),
+            text_token_count=4,
+        )
+
+    # Push enough samples to force global budget eviction.
+    push("single:0")
+    push("single:1")
+    push("single:0")
+    push("single:1")
+
+    assert runtime.replay_total_bytes <= runtime.replay_max_bytes
+    total_samples = sum(len(buf) for buf in runtime.replay_buffers.values())
+    assert total_samples >= 1
+    assert total_samples < 4
+
+
 def test_maybe_reserve_memory_dedupes(monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("Memory reservation test requires CUDA device.")

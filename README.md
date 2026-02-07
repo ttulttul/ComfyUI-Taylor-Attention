@@ -148,7 +148,7 @@ The `Flux2TTR` node now uses a **hybrid kernel-regression attention** replacemen
   - `query_chunk_size`, `key_chunk_size`
   - `landmark_count`, `text_tokens_guess`
   - `alpha_init`, `alpha_lr_multiplier`, `phi_lr_multiplier`
-  - `training_query_token_cap`, `replay_buffer_size`, `train_steps_per_call`
+  - `training_query_token_cap`, `replay_buffer_size`, `replay_offload_cpu`, `replay_max_mb`, `train_steps_per_call`
   - `huber_beta`, `grad_clip_norm`
   - `readiness_threshold`, `readiness_min_updates`
   - `layer_start` / `layer_end` (optional single-block index range to patch)
@@ -173,6 +173,7 @@ Speed tips:
 - Keep `training_query_token_cap` in the `64-256` range for practical replay memory during online distillation (`128` default).
 - `replay_buffer_size` now defaults to `8` (instead of large buffers) to keep VRAM stable during online training.
 - Replay samples are offloaded to CPU in reduced precision by default, then moved back to GPU per optimization step.
+- Replay memory is now globally budgeted across all layers (`replay_max_mb`, default `768MB`) with oldest-sample eviction to avoid host RAM growth and OS-level `KILLED` events.
 - Use `layer_start` / `layer_end` to patch only late single blocks as a cheap quality/speed tradeoff.
 - Keep `inference_mixed_precision=true` on CUDA for the fastest inference path.
 - Flux2TTR now asks ComfyUI to reserve VRAM ahead of each TTR call (Taylor-style `free_memory` reservation) using a `1.1x` safety factor over estimated need.
