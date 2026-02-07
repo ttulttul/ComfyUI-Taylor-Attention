@@ -566,6 +566,7 @@ class Flux2TTRRuntime:
         grad_clip_norm: float = _DEFAULT_GRAD_CLIP,
         readiness_threshold: float = _DEFAULT_READY_THRESHOLD,
         readiness_min_updates: int = _DEFAULT_READY_MIN_UPDATES,
+        enable_memory_reserve: bool = False,
         layer_start: int = -1,
         layer_end: int = -1,
         inference_mixed_precision: bool = True,
@@ -600,6 +601,7 @@ class Flux2TTRRuntime:
         self.grad_clip_norm = max(0.0, float(grad_clip_norm))
         self.readiness_threshold = float(readiness_threshold)
         self.readiness_min_updates = max(0, int(readiness_min_updates))
+        self.enable_memory_reserve = bool(enable_memory_reserve)
 
         self.layer_start = int(layer_start)
         self.layer_end = int(layer_end)
@@ -641,9 +643,11 @@ class Flux2TTRRuntime:
                 logger.warning("Flux2TTR: failed to end Comet experiment cleanly: %s", exc)
             self._comet_experiment = None
 
-        for layer in self.layers.values():
+        # Avoid explicit CPU transfers here; cleanup can be called near the end of
+        # a run where outstanding CUDA work may still reference these modules.
+        if torch.cuda.is_available():
             try:
-                layer.to(device="cpu")
+                torch.cuda.synchronize()
             except Exception:
                 pass
         self.layers.clear()
@@ -765,6 +769,21 @@ class Flux2TTRRuntime:
                     state[key] = value.to(device=device, dtype=target_dtype)
                 else:
                     state[key] = value.to(device=device)
+
+    @staticmethod
+    def _ensure_layer_device(layer: Flux2HKRAttnLayer, device: torch.device) -> None:
+        needs_move = False
+        for p in layer.parameters():
+            if p.device != device:
+                needs_move = True
+                break
+        if not needs_move:
+            for b in layer.buffers():
+                if b.device != device:
+                    needs_move = True
+                    break
+        if needs_move:
+            layer.to(device=device)
 
     def _resolve_inference_dtype(self, q: torch.Tensor) -> torch.dtype:
         if not self.inference_mixed_precision:
@@ -954,10 +973,11 @@ class Flux2TTRRuntime:
         reserve_memory: bool = True,
     ) -> torch.Tensor:
         layer = self._ensure_layer(layer_key, head_dim, q_eff.device)
+        self._ensure_layer_device(layer, q_eff.device)
         layer.eval()
 
         inference_dtype = self._resolve_inference_dtype(q_eff)
-        if reserve_memory:
+        if reserve_memory and self.enable_memory_reserve:
             _maybe_reserve_memory(
                 self,
                 q_eff,
@@ -969,6 +989,7 @@ class Flux2TTRRuntime:
             )
 
         self._set_layer_dtype(layer_key, layer, inference_dtype)
+        self._ensure_layer_device(layer, q_eff.device)
         with torch.no_grad():
             student = layer(
                 q=q_eff.to(dtype=inference_dtype),
@@ -1017,8 +1038,10 @@ class Flux2TTRRuntime:
             return
 
         layer = self._ensure_layer(layer_key, head_dim, device)
+        self._ensure_layer_device(layer, device)
         optimizer = self.optimizers[layer_key]
         self._set_layer_dtype(layer_key, layer, torch.float32)
+        self._ensure_layer_device(layer, device)
         layer.train()
 
         steps = min(self.train_steps_per_call, self.steps_remaining)
@@ -1140,7 +1163,8 @@ class Flux2TTRRuntime:
 
         if self.training_mode:
             if self.training_enabled and self.steps_remaining > 0:
-                _maybe_reserve_memory(
+                if self.enable_memory_reserve:
+                    _maybe_reserve_memory(
                     self,
                     q_eff,
                     k_eff,
@@ -1148,7 +1172,7 @@ class Flux2TTRRuntime:
                     training=True,
                     dtype_accum=torch.float32,
                     layer_key=layer_key,
-                )
+                    )
 
                 teacher_bhnd = _unflatten_heads(teacher_out, q.shape[1], q.shape[3]).float().clone()
                 q_train = q_eff.float().clone()
@@ -1331,6 +1355,7 @@ class Flux2TTRRuntime:
             "grad_clip_norm": self.grad_clip_norm,
             "readiness_threshold": self.readiness_threshold,
             "readiness_min_updates": self.readiness_min_updates,
+            "enable_memory_reserve": self.enable_memory_reserve,
             "max_safe_inference_loss": self.max_safe_inference_loss,
             "layer_start": self.layer_start,
             "layer_end": self.layer_end,
@@ -1393,6 +1418,7 @@ class Flux2TTRRuntime:
         self.grad_clip_norm = max(0.0, float(payload.get("grad_clip_norm", self.grad_clip_norm)))
         self.readiness_threshold = float(payload.get("readiness_threshold", self.readiness_threshold))
         self.readiness_min_updates = max(0, int(payload.get("readiness_min_updates", self.readiness_min_updates)))
+        self.enable_memory_reserve = bool(payload.get("enable_memory_reserve", self.enable_memory_reserve))
 
         self.max_safe_inference_loss = float(payload.get("max_safe_inference_loss", self.max_safe_inference_loss))
         self.layer_start = int(payload.get("layer_start", self.layer_start))
@@ -1470,6 +1496,7 @@ def _recover_runtime_from_config(cfg: dict) -> Optional[Flux2TTRRuntime]:
         grad_clip_norm=float(cfg.get("grad_clip_norm", _DEFAULT_GRAD_CLIP)),
         readiness_threshold=float(cfg.get("readiness_threshold", _DEFAULT_READY_THRESHOLD)),
         readiness_min_updates=int(cfg.get("readiness_min_updates", _DEFAULT_READY_MIN_UPDATES)),
+        enable_memory_reserve=bool(cfg.get("enable_memory_reserve", False)),
         layer_start=int(cfg.get("layer_start", -1)),
         layer_end=int(cfg.get("layer_end", -1)),
         inference_mixed_precision=bool(cfg.get("inference_mixed_precision", True)),

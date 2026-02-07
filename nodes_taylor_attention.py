@@ -659,6 +659,11 @@ class Flux2TTR(io.ComfyNode):
                     step=1,
                     tooltip="Minimum replay updates before a layer can be marked ready.",
                 ),
+                io.Boolean.Input(
+                    "enable_memory_reserve",
+                    default=False,
+                    tooltip="Call ComfyUI free_memory before HKR attention allocations (can offload aggressively).",
+                ),
                 io.Int.Input(
                     "layer_start",
                     default=-1,
@@ -715,6 +720,7 @@ class Flux2TTR(io.ComfyNode):
         grad_clip_norm: float,
         readiness_threshold: float,
         readiness_min_updates: int,
+        enable_memory_reserve: bool,
         layer_start: int,
         layer_end: int,
         inference_mixed_precision: bool,
@@ -751,6 +757,7 @@ class Flux2TTR(io.ComfyNode):
             grad_clip_norm=float(grad_clip_norm),
             readiness_threshold=float(readiness_threshold),
             readiness_min_updates=int(readiness_min_updates),
+            enable_memory_reserve=bool(enable_memory_reserve),
             layer_start=int(layer_start),
             layer_end=int(layer_end),
             inference_mixed_precision=bool(inference_mixed_precision),
@@ -814,6 +821,7 @@ class Flux2TTR(io.ComfyNode):
             "grad_clip_norm": float(grad_clip_norm),
             "readiness_threshold": float(readiness_threshold),
             "readiness_min_updates": int(readiness_min_updates),
+            "enable_memory_reserve": bool(enable_memory_reserve),
             "layer_start": int(layer_start),
             "layer_end": int(layer_end),
             "inference_mixed_precision": bool(inference_mixed_precision),
@@ -839,7 +847,7 @@ class Flux2TTR(io.ComfyNode):
             (
                 "Flux2TTR configured: training_mode=%s training_preview_ttr=%s comet_enabled=%s "
                 "training_steps=%d feature_dim=%d q_chunk=%d k_chunk=%d landmarks=%d "
-                "replay=%d train_steps_per_call=%d readiness=(%.6g,%d) layer_range=[%d,%d] "
+                "replay=%d train_steps_per_call=%d readiness=(%.6g,%d) reserve=%s layer_range=[%d,%d] "
                 "mixed_precision=%s checkpoint=%s loss=%.6g"
             ),
             training,
@@ -854,6 +862,7 @@ class Flux2TTR(io.ComfyNode):
             int(train_steps_per_call),
             float(readiness_threshold),
             int(readiness_min_updates),
+            bool(enable_memory_reserve),
             int(layer_start),
             int(layer_end),
             bool(inference_mixed_precision),

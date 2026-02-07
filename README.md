@@ -174,6 +174,7 @@ Speed tips:
 - Use `layer_start` / `layer_end` to patch only late single blocks as a cheap quality/speed tradeoff.
 - Keep `inference_mixed_precision=true` on CUDA for the fastest inference path.
 - Flux2TTR now asks ComfyUI to reserve VRAM ahead of each TTR call (Taylor-style `free_memory` reservation) using a `1.1x` safety factor over estimated need.
+- `enable_memory_reserve` is now **off by default** for Flux2TTR because aggressive mid-run offload requests can cause CPU/CUDA device mismatches in downstream linear layers on some ComfyUI runs.
 - Note: this reservation is advisory/offload-oriented (via `free_memory`), not a persistent allocation; Flux2TTR now releases runtime GPU state and unregisters runtime objects at cleanup to avoid VRAM buildup across repeated runs.
 - If a cached graph references a missing Flux2TTR runtime ID, the node now attempts to recover runtime state from its saved config + `checkpoint_path` instead of immediately falling back.
 - Training at `feature_dim=256` typically needs roughly a few GB of extra VRAM; reservation is intended to offload earlier nodes before HKR allocations.

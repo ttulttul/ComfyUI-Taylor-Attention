@@ -61,3 +61,4 @@
 - Flux2TTR quality/stability improved substantially after replacing bidirectional scan TTR with a normalized kernel-regression attention core plus a small landmark softmax residual; this preserves query-dependent normalization while keeping linear-time memory.
 - For online distillation, subsampling only queries (while keeping full keys/values) is critical; replay-buffer training on `(q_sub, k_full, v_full, teacher_sub)` is markedly more learnable than subsampling q/k/v together.
 - Per-layer EMA readiness gates are essential for fail-closed inference: layers should stay on native teacher attention until enough updates are seen and EMA loss is below threshold.
+- In Flux2TTR, calling `model_management.free_memory` during attention can trigger downstream CPU/CUDA mismatches on some runs; making memory reservation opt-in (off by default) avoids these device errors.
