@@ -14,13 +14,13 @@ opencv-python<4.11
 opencv-python-headless<4.11
 EOF
 
-echo "2. Installing build tools..."
-# Fixes 'No module named pkg_resources' error for image-reward
-uv pip install setuptools
+echo "2. Installing packaging/runtime tools..."
+# Fixes 'No module named pkg_resources' from clip/pyiqa and image-reward install issues.
+uv pip install -U setuptools packaging
 
 echo "3. Resolving dependencies..."
 # Compiles the requirements into a temporary file using the overrides
-# --no-build-isolation allows image-reward to see the setuptools we just installed
+# --no-build-isolation allows image-reward to see the packaging tools we just installed
 uv pip compile pyproject.toml \
     -o temp_reqs.txt \
     --no-build-isolation \
