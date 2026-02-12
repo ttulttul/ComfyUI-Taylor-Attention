@@ -338,6 +338,12 @@ def build_comet_metrics(metrics: dict[str, Any]) -> dict[str, float]:
     return payload
 
 
+def comet_payload_keys_text(payload: dict[str, float]) -> str:
+    if not payload:
+        return "<empty>"
+    return ", ".join(sorted(str(key) for key in payload.keys()))
+
+
 def safe_comet_log_metrics(
     experiment: Any,
     payload: dict[str, float],
@@ -1431,9 +1437,15 @@ class ControllerTrainerNodeEngine:
             include_first_step=True,
         )
         if should_log:
+            comet_payload = build_comet_metrics(metrics)
+            self.logger.debug(
+                "Flux2TTRControllerTrainer: Comet payload keys step=%d: %s",
+                int(self.loop_state.global_step),
+                comet_payload_keys_text(comet_payload),
+            )
             safe_comet_log_metrics(
                 self.run_plan.comet_experiment,
-                build_comet_metrics(metrics),
+                comet_payload,
                 step=self.loop_state.global_step,
                 logger=self.logger,
             )

@@ -93,3 +93,17 @@ def test_sigma_reward_terms_efficiency_penalty_is_symmetric():
     assert terms_high.target_full_attn_ratio == pytest.approx(0.5)
     assert terms_low.efficiency_penalty == pytest.approx(0.2, abs=1e-6)
     assert terms_high.efficiency_penalty == pytest.approx(0.2, abs=1e-6)
+
+
+def test_comet_payload_keys_text_sorts_keys():
+    text = trainer_node.comet_payload_keys_text(
+        {
+            "flux2ttr_controller/gemini_quality": 2.0,
+            "flux2ttr_controller/gemini_similarity": 8.0,
+        }
+    )
+    assert text == "flux2ttr_controller/gemini_quality, flux2ttr_controller/gemini_similarity"
+
+
+def test_comet_payload_keys_text_empty_payload():
+    assert trainer_node.comet_payload_keys_text({}) == "<empty>"
