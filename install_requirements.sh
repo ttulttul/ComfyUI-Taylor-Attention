@@ -92,7 +92,7 @@ ensure_pkg_resources
 
 echo "3. Resolving dependencies..."
 # Compiles the requirements into a temporary file using the overrides
-# --no-build-isolation allows image-reward to see the packaging tools we just installed
+# --no-build-isolation keeps build-time tooling visible to dependency builds
 uv pip compile pyproject.toml \
     --python "${PYTHON_BIN}" \
     -o temp_reqs.txt \

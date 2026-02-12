@@ -10,7 +10,6 @@ dependencies = [
   "dreamsim",
   "einops",
   "hpsv2",
-  "image-reward",
   "psutil",
   "pyiqa>=0.1.11",
   "timm>=0.9.16",
@@ -22,6 +21,10 @@ dependencies = [
 [project.optional-dependencies]
 test = [
   "pytest",
+]
+imagereward = [
+  "image-reward==1.5",
+  "timm==0.6.13",
 ]
 
 [tool.pytest.ini_options]

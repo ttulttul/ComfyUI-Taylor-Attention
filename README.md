@@ -17,6 +17,8 @@ both before and after the resolved install step, and applies compatibility
 fallbacks (including a minimal `pkg_resources -> packaging` shim) automatically.
 It also enforces a BIQA-compatible `timm` (with `timm.models._builder`) and
 checks `import pyiqa` before reporting success.
+`image-reward` is not installed by default because it pins an older `timm`
+that conflicts with BIQA (`pyiqa`) requirements.
 
 ## Available Nodes
 
@@ -91,7 +93,8 @@ For HPS/BIQA terms, the trainer compares teacher and student scores and penalize
 
 **Trainer modularization.** The `Flux2TTRControllerTrainer` node now delegates its execution flow to `flux2_ttr_controller_trainer_node.py`, with small composable helper functions for sampling, policy updates, metrics, checkpointing, and Comet logging.
 
-**Optional quality-model dependencies.** Additional controller quality terms are activated only when their weights are non-zero: `dreamsim` for DreamSim, `hpsv2` or `ImageReward` for HPS/ImageReward, and `pyiqa` (Q-Align or LIQE fallback) for BIQA metrics.
+**Optional quality-model dependencies.** Additional controller quality terms are activated only when their weights are non-zero: `dreamsim` for DreamSim, `hpsv2` (default) or optional `ImageReward` for HPS/ImageReward, and `pyiqa` (Q-Align or LIQE fallback) for BIQA metrics.
+For environments using BIQA, prefer `hpsv2`; `image-reward==1.5` pins `timm==0.6.13` and can conflict with `pyiqa`.
 When DreamSim is enabled inside ComfyUI, the trainer now detects the known `from utils import trunc_normal_` namespace collision and retries import with DreamSim's bundled `utils` shim (package or single-module layouts), then falls back to a temporary `utils.trunc_normal_` patch if needed. Recovery is applied for both import-time and deferred `dreamsim(...)` call-time imports.
 
 **Inference.** `Flux2TTRController` exposes a `quality_speed` knob to trade quality against speed through controller thresholding. It supports two policy modes: `stochastic` (the default) samples one controller mask per diffusion step — cached for all layer calls in that step — to match sigma-aware policy training behavior, while `threshold` mode uses a deterministic cutoff. For checkpoint consistency, controller inference now derives `feature_dim` directly from TTR checkpoint metadata rather than assuming a default. Per-step routing summaries (sigma, threshold, student-routed layer set) are logged once per step.
