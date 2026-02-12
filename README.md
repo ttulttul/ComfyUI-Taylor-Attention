@@ -11,7 +11,9 @@ to install all of the prerequisites you will need for training using this node
 pack. Pre-requisites are found in `pyproject.toml`.
 For scripted installs, `install_requirements.sh` accepts an optional venv
 directory argument (for example `bash install_requirements.sh /venv/main`) and
-installs into that environment explicitly.
+installs into that environment explicitly. The script also verifies
+`pkg_resources` availability for `image-reward`/`pyiqa` dependency resolution
+and applies compatibility fallbacks automatically.
 
 ## Available Nodes
 

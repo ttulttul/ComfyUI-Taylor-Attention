@@ -34,6 +34,18 @@ EOF
 echo "2. Installing packaging/runtime tools..."
 # Fixes 'No module named pkg_resources' from clip/pyiqa and image-reward install issues.
 uv pip install --python "${PYTHON_BIN}" -U setuptools packaging
+if ! "${PYTHON_BIN}" -c "import pkg_resources" >/dev/null 2>&1; then
+    echo "2b. pkg_resources not found; attempting to install compatibility package..."
+    if ! uv pip install --python "${PYTHON_BIN}" -U pkg_resources; then
+        echo "2c. pkg_resources package unavailable; pinning setuptools<81 for bundled pkg_resources..."
+        uv pip install --python "${PYTHON_BIN}" -U "setuptools<81"
+    fi
+fi
+if ! "${PYTHON_BIN}" -c "import pkg_resources" >/dev/null 2>&1; then
+    echo "Error: pkg_resources is still unavailable in '${VENV_DIR}'."
+    echo "Please install setuptools with pkg_resources support in this environment and retry."
+    exit 1
+fi
 
 echo "3. Resolving dependencies..."
 # Compiles the requirements into a temporary file using the overrides
