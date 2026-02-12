@@ -9,6 +9,9 @@ ComfyUI.  For prerequisites, unless you are using ComfyUI's official installer
 (unlikely), run `uv pip install -e custom_nodes/ComfyUI-Approximate-Attention`
 to install all of the prerequisites you will need for training using this node
 pack. Pre-requisites are found in `pyproject.toml`.
+For scripted installs, `install_requirements.sh` accepts an optional venv
+directory argument (for example `bash install_requirements.sh /venv/main`) and
+installs into that environment explicitly.
 
 ## Available Nodes
 
