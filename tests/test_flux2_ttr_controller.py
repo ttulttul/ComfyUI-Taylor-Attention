@@ -595,6 +595,42 @@ def test_controller_trainer_gemini_accepts_inline_api_key(monkeypatch):
     assert getattr(trainer.gemini_client, "api_key", "") == "inline-key"
 
 
+def test_controller_trainer_compute_loss_skips_gemini_terms_when_api_fails(caplog):
+    controller = flux2_ttr_controller.TTRController(num_layers=2, embed_dim=8, hidden_dim=16)
+    trainer = flux2_ttr_controller.ControllerTrainer(controller, lpips_weight=0.0)
+    trainer.gemini_similarity_weight = 3.0
+    trainer.gemini_quality_weight = 5.0
+
+    def _raise_gemini_failure(**kwargs):
+        del kwargs
+        raise flux2_ttr_controller._GeminiAPICallError("transient API failure")
+
+    trainer._score_gemini_batch = _raise_gemini_failure
+
+    teacher = torch.zeros(1, 4, 4, 4)
+    student = torch.ones_like(teacher) * 0.25
+    teacher_rgb = torch.zeros(1, 3, 8, 8)
+    student_rgb = torch.ones(1, 3, 8, 8) * 0.25
+
+    with caplog.at_level("WARNING"):
+        loss, metrics = trainer.compute_loss(
+            teacher_latent=teacher,
+            student_latent=student,
+            actual_full_attn_ratio=0.0,
+            teacher_rgb=teacher_rgb,
+            student_rgb=student_rgb,
+            include_efficiency_penalty=False,
+        )
+
+    expected_base = trainer.rmse_weight * metrics["rmse"] + trainer.cosine_weight * metrics["cosine_distance"]
+    assert loss.item() == pytest.approx(expected_base, rel=1e-5)
+    assert metrics["gemini_similarity"] == pytest.approx(0.0)
+    assert metrics["gemini_quality"] == pytest.approx(0.0)
+    assert metrics["gemini_similarity_penalty"] == pytest.approx(0.0)
+    assert metrics["gemini_quality_penalty"] == pytest.approx(0.0)
+    assert "skipping Gemini terms" in caplog.text
+
+
 def test_controller_trainer_dreamsim_recovers_from_shadowed_utils(monkeypatch, tmp_path):
     dreamsim_pkg = tmp_path / "dreamsim"
     dreamsim_pkg.mkdir()

@@ -36,6 +36,10 @@ _GEMINI_SCORE_MIN = 1.0
 _GEMINI_SCORE_MAX = 10.0
 
 
+class _GeminiAPICallError(RuntimeError):
+    """Raised when a Gemini scoring API call fails for an iteration."""
+
+
 def should_save_controller_checkpoint_step(step: int, checkpoint_every: int = DEFAULT_CONTROLLER_CHECKPOINT_EVERY) -> bool:
     return int(step) > 0 and int(checkpoint_every) > 0 and (int(step) % int(checkpoint_every) == 0)
 
@@ -1257,11 +1261,14 @@ class ControllerTrainer:
                 type(exc).__name__,
                 exc,
             )
-            raise RuntimeError("ControllerTrainer: Gemini API request failed.") from exc
+            raise _GeminiAPICallError("ControllerTrainer: Gemini API request failed.") from exc
         response_text = "".join(chunks).strip()
         if not response_text:
-            raise RuntimeError("ControllerTrainer: Gemini API returned an empty response.")
-        return self._parse_gemini_json_scores(response_text)
+            raise _GeminiAPICallError("ControllerTrainer: Gemini API returned an empty response.")
+        try:
+            return self._parse_gemini_json_scores(response_text)
+        except ValueError as exc:
+            raise _GeminiAPICallError("ControllerTrainer: Gemini API returned invalid JSON payload.") from exc
 
     def _score_gemini_batch(
         self,
@@ -1415,15 +1422,23 @@ class ControllerTrainer:
                 biqa_aesthetic_penalty = torch.relu(biqa_aesthetic_teacher - biqa_aesthetic_student)
                 loss = loss + self.biqa_aesthetic_weight * biqa_aesthetic_penalty
             if self.gemini_similarity_weight > 0 or self.gemini_quality_weight > 0:
-                gemini_similarity, gemini_quality = self._score_gemini_batch(
-                    teacher_rgb_01=teacher_rgb_01,
-                    student_rgb_01=student_rgb_01,
-                    loss=loss,
-                )
-                gemini_similarity_penalty = self._gemini_score_to_penalty(gemini_similarity)
-                gemini_quality_penalty = self._gemini_score_to_penalty(gemini_quality)
-                loss = loss + self.gemini_similarity_weight * gemini_similarity_penalty
-                loss = loss + self.gemini_quality_weight * gemini_quality_penalty
+                try:
+                    gemini_similarity, gemini_quality = self._score_gemini_batch(
+                        teacher_rgb_01=teacher_rgb_01,
+                        student_rgb_01=student_rgb_01,
+                        loss=loss,
+                    )
+                    gemini_similarity_penalty = self._gemini_score_to_penalty(gemini_similarity)
+                    gemini_quality_penalty = self._gemini_score_to_penalty(gemini_quality)
+                    loss = loss + self.gemini_similarity_weight * gemini_similarity_penalty
+                    loss = loss + self.gemini_quality_weight * gemini_quality_penalty
+                except _GeminiAPICallError as exc:
+                    # Soft-fail Gemini for this iteration while keeping the rest
+                    # of controller quality/reward training active.
+                    logger.warning(
+                        "ControllerTrainer: Gemini scoring failed for this iteration; skipping Gemini terms (%s).",
+                        exc,
+                    )
 
         ratio = self._ratio_tensor(
             actual_full_attn_ratio,

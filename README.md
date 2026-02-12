@@ -98,6 +98,7 @@ For Gemini terms, the trainer sends teacher/student PNG image pairs to the confi
 
 **Optional quality-model dependencies.** Additional controller quality terms are activated only when their weights are non-zero: `dreamsim` for DreamSim, `hpsv2` (default) or optional `ImageReward` for HPS/ImageReward, `pyiqa` (Q-Align or LIQE fallback) for BIQA metrics, and `google-genai` for Gemini pairwise image scoring.
 Gemini scoring uses `loss_config.gemini_api_key` when provided, otherwise reads from `loss_config.gemini_api_key_env` (default `GEMINI_API_KEY`), and uses `loss_config.gemini_model` (default `gemini-3-flash-preview`).
+If a Gemini API call fails for an iteration, controller training continues and Gemini terms are skipped for that iteration (equivalent to temporary Gemini weights of `0.0`).
 For environments using BIQA, prefer `hpsv2`; `image-reward==1.5` pins `timm==0.6.13` and can conflict with `pyiqa`.
 When DreamSim is enabled inside ComfyUI, the trainer now detects the known `from utils import trunc_normal_` namespace collision and retries import with DreamSim's bundled `utils` shim (package or single-module layouts), then falls back to a temporary `utils.trunc_normal_` patch if needed. Recovery is applied for both import-time and deferred `dreamsim(...)` call-time imports.
 
