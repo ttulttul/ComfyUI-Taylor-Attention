@@ -15,6 +15,8 @@ installs into that environment explicitly. The script also verifies
 `pkg_resources` availability for `image-reward`/`pyiqa` dependency resolution
 both before and after the resolved install step, and applies compatibility
 fallbacks (including a minimal `pkg_resources -> packaging` shim) automatically.
+It also enforces a BIQA-compatible `timm` (with `timm.models._builder`) and
+checks `import pyiqa` before reporting success.
 
 ## Available Nodes
 

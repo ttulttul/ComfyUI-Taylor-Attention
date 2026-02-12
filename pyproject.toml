@@ -13,6 +13,7 @@ dependencies = [
   "image-reward",
   "psutil",
   "pyiqa>=0.1.11",
+  "timm>=0.9.16",
   "pillow",
   "torch",
   "numpy",
