@@ -452,6 +452,7 @@ def test_controller_trainer_training_config_overrides_defaults(monkeypatch):
             "gemini_similarity_weight": 0.6,
             "gemini_quality_weight": 0.7,
             "gemini_model": "gemini-3-flash-preview",
+            "gemini_api_key": "inline-gemini-key",
             "gemini_api_key_env": "CUSTOM_GEMINI_API_KEY",
             "reward_baseline_quality_floor": -0.25,
         },
@@ -489,6 +490,7 @@ def test_controller_trainer_training_config_overrides_defaults(monkeypatch):
     assert trainer.gemini_similarity_weight == pytest.approx(0.6)
     assert trainer.gemini_quality_weight == pytest.approx(0.7)
     assert trainer.gemini_model == "gemini-3-flash-preview"
+    assert trainer.gemini_api_key == "inline-gemini-key"
     assert trainer.gemini_api_key_env == "CUSTOM_GEMINI_API_KEY"
     assert trainer.reward_baseline_quality_floor == pytest.approx(-0.25)
     assert trainer.optimizer.param_groups[0]["lr"] == pytest.approx(3e-4)
@@ -564,8 +566,33 @@ def test_controller_trainer_parse_gemini_json_scores_rejects_invalid_payload():
 def test_controller_trainer_gemini_requires_api_key_env(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     controller = flux2_ttr_controller.TTRController(num_layers=2, embed_dim=8, hidden_dim=16)
-    with pytest.raises(RuntimeError, match="environment variable"):
+    with pytest.raises(RuntimeError, match="no API key"):
         flux2_ttr_controller.ControllerTrainer(controller, gemini_similarity_weight=1.0)
+
+
+def test_controller_trainer_gemini_accepts_inline_api_key(monkeypatch):
+    class _FakeClient:
+        def __init__(self, *, api_key: str):
+            self.api_key = api_key
+
+    fake_genai_module = types.ModuleType("google.genai")
+    fake_genai_module.Client = _FakeClient
+    fake_genai_module.types = types.SimpleNamespace()
+    fake_google_module = types.ModuleType("google")
+    fake_google_module.genai = fake_genai_module
+
+    monkeypatch.delenv("UNSET_GEMINI_ENV", raising=False)
+    monkeypatch.setitem(sys.modules, "google", fake_google_module)
+    monkeypatch.setitem(sys.modules, "google.genai", fake_genai_module)
+
+    controller = flux2_ttr_controller.TTRController(num_layers=2, embed_dim=8, hidden_dim=16)
+    trainer = flux2_ttr_controller.ControllerTrainer(
+        controller,
+        gemini_similarity_weight=1.0,
+        gemini_api_key="inline-key",
+        gemini_api_key_env="UNSET_GEMINI_ENV",
+    )
+    assert getattr(trainer.gemini_client, "api_key", "") == "inline-key"
 
 
 def test_controller_trainer_dreamsim_recovers_from_shadowed_utils(monkeypatch, tmp_path):

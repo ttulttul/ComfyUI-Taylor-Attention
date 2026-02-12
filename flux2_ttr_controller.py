@@ -490,6 +490,7 @@ class ControllerTrainer:
         gemini_similarity_weight: float = 0.0,
         gemini_quality_weight: float = 0.0,
         gemini_model: str = _DEFAULT_GEMINI_MODEL,
+        gemini_api_key: str = "",
         gemini_api_key_env: str = _DEFAULT_GEMINI_API_KEY_ENV,
         gemini_prompt: str = _DEFAULT_GEMINI_PROMPT,
         hps_prompt: str = "",
@@ -518,6 +519,7 @@ class ControllerTrainer:
             gemini_similarity_weight = float(loss_cfg.get("gemini_similarity_weight", gemini_similarity_weight))
             gemini_quality_weight = float(loss_cfg.get("gemini_quality_weight", gemini_quality_weight))
             gemini_model = str(loss_cfg.get("gemini_model", gemini_model))
+            gemini_api_key = str(loss_cfg.get("gemini_api_key", gemini_api_key))
             gemini_api_key_env = str(loss_cfg.get("gemini_api_key_env", gemini_api_key_env))
             gemini_prompt = str(loss_cfg.get("gemini_prompt", gemini_prompt))
             hps_prompt = str(loss_cfg.get("hps_prompt", hps_prompt))
@@ -555,6 +557,7 @@ class ControllerTrainer:
         self.gemini_similarity_weight = max(0.0, float(gemini_similarity_weight))
         self.gemini_quality_weight = max(0.0, float(gemini_quality_weight))
         self.gemini_model = str(gemini_model or _DEFAULT_GEMINI_MODEL)
+        self.gemini_api_key = str(gemini_api_key or "").strip()
         self.gemini_api_key_env = str(gemini_api_key_env or _DEFAULT_GEMINI_API_KEY_ENV)
         self.gemini_prompt = str(gemini_prompt or _DEFAULT_GEMINI_PROMPT)
         self.hps_prompt = str(hps_prompt or "")
@@ -603,7 +606,7 @@ class ControllerTrainer:
         logger.info(
             (
                 "ControllerTrainer initialized: lr=%.6g rmse=%.4g cosine=%.4g lpips=%.4g dreamsim=%.4g hps=%.4g biqa_q=%.4g biqa_a=%.4g "
-                "gemini_similarity=%.4g gemini_quality=%.4g gemini_model=%s "
+                "gemini_similarity=%.4g gemini_quality=%.4g gemini_model=%s gemini_api_key=%s gemini_api_key_env=%s "
                 "target_ttr_ratio=%.4g target_full_attn_ratio=%.4g "
                 "lambda_eff=%.4g lambda_entropy=%.4g grad_clip=%.4g baseline_quality_floor=%.4g"
             ),
@@ -618,6 +621,8 @@ class ControllerTrainer:
             self.gemini_similarity_weight,
             self.gemini_quality_weight,
             self.gemini_model,
+            "<set>" if self.gemini_api_key else "<empty>",
+            self.gemini_api_key_env,
             self.target_ttr_ratio,
             self._target_full_attn_ratio_from_ttr_ratio(self.target_ttr_ratio),
             self.lambda_eff,
@@ -1138,13 +1143,18 @@ class ControllerTrainer:
         return self._to_scalar_tensor(out, device=loss.device, dtype=loss.dtype)
 
     def _init_gemini_client(self) -> None:
+        api_key = str(self.gemini_api_key or "").strip()
         api_key_env = str(self.gemini_api_key_env or "").strip()
-        if not api_key_env:
-            raise RuntimeError("ControllerTrainer: Gemini scoring requires a non-empty gemini_api_key_env.")
-        api_key = str(os.environ.get(api_key_env, "")).strip()
+        if not api_key and not api_key_env:
+            raise RuntimeError(
+                "ControllerTrainer: Gemini scoring requires gemini_api_key or a non-empty gemini_api_key_env."
+            )
+        if not api_key:
+            api_key = str(os.environ.get(api_key_env, "")).strip()
         if not api_key:
             raise RuntimeError(
-                f"ControllerTrainer: Gemini scoring enabled but environment variable {api_key_env!r} is not set."
+                "ControllerTrainer: Gemini scoring enabled but no API key was provided via gemini_api_key "
+                f"and environment variable {api_key_env!r} is not set."
             )
         try:
             from google import genai  # type: ignore

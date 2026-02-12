@@ -50,6 +50,7 @@ _TRAINING_CONFIG_DEFAULTS: dict[str, dict[str, Any]] = {
         "gemini_similarity_weight": 0.0,
         "gemini_quality_weight": 0.0,
         "gemini_model": "gemini-3-flash-preview",
+        "gemini_api_key": "",
         "gemini_api_key_env": "GEMINI_API_KEY",
         "reward_baseline_quality_floor": -0.3,
         "huber_beta": 0.05,
@@ -258,6 +259,7 @@ def _build_training_config_payload(
     gemini_similarity_weight: float,
     gemini_quality_weight: float,
     gemini_model: str,
+    gemini_api_key: str,
     gemini_api_key_env: str,
     reward_baseline_quality_floor: float,
     huber_beta: float,
@@ -290,6 +292,7 @@ def _build_training_config_payload(
             "gemini_similarity_weight": float(gemini_similarity_weight),
             "gemini_quality_weight": float(gemini_quality_weight),
             "gemini_model": str(gemini_model or "gemini-3-flash-preview"),
+            "gemini_api_key": str(gemini_api_key or ""),
             "gemini_api_key_env": str(gemini_api_key_env or "GEMINI_API_KEY"),
             "reward_baseline_quality_floor": float(reward_baseline_quality_floor),
             "huber_beta": float(huber_beta),
@@ -347,6 +350,12 @@ class Flux2TTRTrainingParameters(io.ComfyNode):
                     tooltip="Gemini model used for image-to-image quality scoring when Gemini weights are enabled.",
                 ),
                 io.String.Input(
+                    "gemini_api_key",
+                    default="",
+                    multiline=False,
+                    tooltip="Optional Gemini API key value. If empty, gemini_api_key_env is used.",
+                ),
+                io.String.Input(
                     "gemini_api_key_env",
                     default="GEMINI_API_KEY",
                     multiline=False,
@@ -400,6 +409,7 @@ class Flux2TTRTrainingParameters(io.ComfyNode):
         gemini_similarity_weight: float,
         gemini_quality_weight: float,
         gemini_model: str,
+        gemini_api_key: str,
         gemini_api_key_env: str,
         reward_baseline_quality_floor: float,
         huber_beta: float,
@@ -431,6 +441,7 @@ class Flux2TTRTrainingParameters(io.ComfyNode):
             gemini_similarity_weight=gemini_similarity_weight,
             gemini_quality_weight=gemini_quality_weight,
             gemini_model=gemini_model,
+            gemini_api_key=gemini_api_key,
             gemini_api_key_env=gemini_api_key_env,
             reward_baseline_quality_floor=reward_baseline_quality_floor,
             huber_beta=huber_beta,
@@ -782,6 +793,10 @@ class Flux2TTRTrainer(io.ComfyNode):
             loss_cfg.get("gemini_model"),
             _TRAINING_CONFIG_DEFAULTS["loss_config"]["gemini_model"],
         )
+        gemini_api_key = _string_or(
+            loss_cfg.get("gemini_api_key"),
+            _TRAINING_CONFIG_DEFAULTS["loss_config"]["gemini_api_key"],
+        )
         gemini_api_key_env = _string_or(
             loss_cfg.get("gemini_api_key_env"),
             _TRAINING_CONFIG_DEFAULTS["loss_config"]["gemini_api_key_env"],
@@ -802,6 +817,7 @@ class Flux2TTRTrainer(io.ComfyNode):
             gemini_similarity_weight=gemini_similarity_weight,
             gemini_quality_weight=gemini_quality_weight,
             gemini_model=gemini_model,
+            gemini_api_key=gemini_api_key,
             gemini_api_key_env=gemini_api_key_env,
             reward_baseline_quality_floor=reward_baseline_quality_floor,
             huber_beta=huber_beta,
