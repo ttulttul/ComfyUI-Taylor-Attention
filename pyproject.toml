@@ -9,6 +9,7 @@ dependencies = [
   "comet-ml",
   "dreamsim",
   "einops",
+  "google-genai",
   "hpsv2",
   "psutil",
   "pyiqa>=0.1.11",

@@ -438,6 +438,7 @@ def test_controller_trainer_training_config_overrides_defaults(monkeypatch):
     monkeypatch.setattr(flux2_ttr_controller.ControllerTrainer, "_init_dreamsim_model", lambda self: None)
     monkeypatch.setattr(flux2_ttr_controller.ControllerTrainer, "_init_hps_model", lambda self: None)
     monkeypatch.setattr(flux2_ttr_controller.ControllerTrainer, "_init_biqa_models", lambda self: None)
+    monkeypatch.setattr(flux2_ttr_controller.ControllerTrainer, "_init_gemini_client", lambda self: None)
     controller = flux2_ttr_controller.TTRController(num_layers=4, embed_dim=16, hidden_dim=32)
     training_config = {
         "loss_config": {
@@ -448,6 +449,10 @@ def test_controller_trainer_training_config_overrides_defaults(monkeypatch):
             "hps_weight": 0.3,
             "biqa_quality_weight": 0.4,
             "biqa_aesthetic_weight": 0.5,
+            "gemini_similarity_weight": 0.6,
+            "gemini_quality_weight": 0.7,
+            "gemini_model": "gemini-3-flash-preview",
+            "gemini_api_key_env": "CUSTOM_GEMINI_API_KEY",
             "reward_baseline_quality_floor": -0.25,
         },
         "optimizer_config": {"learning_rate": 3e-4, "grad_clip_norm": 0.25},
@@ -464,6 +469,8 @@ def test_controller_trainer_training_config_overrides_defaults(monkeypatch):
         hps_weight=0.0,
         biqa_quality_weight=0.0,
         biqa_aesthetic_weight=0.0,
+        gemini_similarity_weight=0.0,
+        gemini_quality_weight=0.0,
         target_ttr_ratio=0.9,
         lambda_eff=7.0,
         lambda_entropy=0.9,
@@ -479,6 +486,10 @@ def test_controller_trainer_training_config_overrides_defaults(monkeypatch):
     assert trainer.hps_weight == pytest.approx(0.3)
     assert trainer.biqa_quality_weight == pytest.approx(0.4)
     assert trainer.biqa_aesthetic_weight == pytest.approx(0.5)
+    assert trainer.gemini_similarity_weight == pytest.approx(0.6)
+    assert trainer.gemini_quality_weight == pytest.approx(0.7)
+    assert trainer.gemini_model == "gemini-3-flash-preview"
+    assert trainer.gemini_api_key_env == "CUSTOM_GEMINI_API_KEY"
     assert trainer.reward_baseline_quality_floor == pytest.approx(-0.25)
     assert trainer.optimizer.param_groups[0]["lr"] == pytest.approx(3e-4)
 
@@ -490,6 +501,8 @@ def test_controller_trainer_compute_loss_with_additional_quality_terms():
     trainer.hps_weight = 0.25
     trainer.biqa_quality_weight = 0.75
     trainer.biqa_aesthetic_weight = 0.1
+    trainer.gemini_similarity_weight = 0.4
+    trainer.gemini_quality_weight = 0.2
     trainer._score_dreamsim = lambda **kwargs: torch.tensor(2.0, device=kwargs["loss"].device)
     hps_values = iter((0.8, 0.3))
     biqa_quality_values = iter((0.9, 0.2))
@@ -497,6 +510,10 @@ def test_controller_trainer_compute_loss_with_additional_quality_terms():
     trainer._score_hps_batch = lambda **kwargs: torch.tensor(next(hps_values), device=kwargs["loss"].device)
     trainer._score_biqa_quality = lambda **kwargs: torch.tensor(next(biqa_quality_values), device=kwargs["loss"].device)
     trainer._score_biqa_aesthetic = lambda **kwargs: torch.tensor(next(biqa_aesthetic_values), device=kwargs["loss"].device)
+    trainer._score_gemini_batch = lambda **kwargs: (
+        torch.tensor(8.0, device=kwargs["loss"].device),
+        torch.tensor(2.0, device=kwargs["loss"].device),
+    )
 
     teacher = torch.zeros(1, 4, 4, 4)
     student = torch.zeros_like(teacher)
@@ -511,13 +528,44 @@ def test_controller_trainer_compute_loss_with_additional_quality_terms():
         include_efficiency_penalty=False,
     )
 
-    expected_quality_terms = 0.5 * 2.0 + 0.25 * (0.8 - 0.3) + 0.75 * (0.9 - 0.2) + 0.1 * (0.7 - 0.4)
+    expected_quality_terms = (
+        0.5 * 2.0
+        + 0.25 * (0.8 - 0.3)
+        + 0.75 * (0.9 - 0.2)
+        + 0.1 * (0.7 - 0.4)
+        + 0.4 * ((10.0 - 8.0) / 9.0)
+        + 0.2 * ((10.0 - 2.0) / 9.0)
+    )
     base_terms = trainer.rmse_weight * metrics["rmse"] + trainer.cosine_weight * metrics["cosine_distance"]
     assert metrics["dreamsim"] == pytest.approx(2.0)
     assert metrics["hps_penalty"] == pytest.approx(0.5)
     assert metrics["biqa_quality_penalty"] == pytest.approx(0.7)
     assert metrics["biqa_aesthetic_penalty"] == pytest.approx(0.3)
+    assert metrics["gemini_similarity"] == pytest.approx(8.0)
+    assert metrics["gemini_quality"] == pytest.approx(2.0)
+    assert metrics["gemini_similarity_penalty"] == pytest.approx((10.0 - 8.0) / 9.0)
+    assert metrics["gemini_quality_penalty"] == pytest.approx((10.0 - 2.0) / 9.0)
     assert loss.item() == pytest.approx(base_terms + expected_quality_terms, rel=1e-5)
+
+
+def test_controller_trainer_parse_gemini_json_scores():
+    similarity, quality = flux2_ttr_controller.ControllerTrainer._parse_gemini_json_scores(
+        "{\"similarity\":8,\"quality\":2}"
+    )
+    assert similarity == pytest.approx(8.0)
+    assert quality == pytest.approx(2.0)
+
+
+def test_controller_trainer_parse_gemini_json_scores_rejects_invalid_payload():
+    with pytest.raises(ValueError):
+        flux2_ttr_controller.ControllerTrainer._parse_gemini_json_scores("{\"similarity\":8}")
+
+
+def test_controller_trainer_gemini_requires_api_key_env(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    controller = flux2_ttr_controller.TTRController(num_layers=2, embed_dim=8, hidden_dim=16)
+    with pytest.raises(RuntimeError, match="environment variable"):
+        flux2_ttr_controller.ControllerTrainer(controller, gemini_similarity_weight=1.0)
 
 
 def test_controller_trainer_dreamsim_recovers_from_shadowed_utils(monkeypatch, tmp_path):

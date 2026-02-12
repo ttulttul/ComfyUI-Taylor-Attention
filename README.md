@@ -81,9 +81,10 @@ The `TTRController` predicts a per-layer routing logit for each diffusion step. 
 
 ### Phase 2: Training Mechanics
 
-Controller training uses policy gradients with quality-driven rewards. A teacher path samples with the original model while a student path samples with the TTR model under controller routing. The quality objective (`compute_loss`) on latent or image outputs combines `rmse_weight × RMSE + cosine_weight × cosine_distance + lpips_weight × LPIPS + dreamsim_weight × DreamSim + hps_weight × HPS_penalty + biqa_quality_weight × BIQA_quality_penalty + biqa_aesthetic_weight × BIQA_aesthetic_penalty`.
+Controller training uses policy gradients with quality-driven rewards. A teacher path samples with the original model while a student path samples with the TTR model under controller routing. The quality objective (`compute_loss`) on latent or image outputs combines `rmse_weight × RMSE + cosine_weight × cosine_distance + lpips_weight × LPIPS + dreamsim_weight × DreamSim + hps_weight × HPS_penalty + biqa_quality_weight × BIQA_quality_penalty + biqa_aesthetic_weight × BIQA_aesthetic_penalty + gemini_similarity_weight × Gemini_similarity_penalty + gemini_quality_weight × Gemini_quality_penalty`.
 
 For HPS/BIQA terms, the trainer compares teacher and student scores and penalizes only when the student is lower (`relu(teacher_score - student_score)`), so improving over the teacher baseline is not penalized.
+For Gemini terms, the trainer sends teacher/student PNG image pairs to the configured Gemini model and expects JSON like `{"similarity":8,"quality":2}`. It then converts both 1-10 scores into penalties (`(10-score)/9`, clamped to non-negative) and applies the configured Gemini weights.
 
 **Reward shaping.** The reward signal is `reward = −quality_loss − λ_eff × efficiency_penalty + λ_entropy × entropy_bonus`, where the efficiency penalty is `abs(actual_full_attn_ratio − target_full_attn_ratio)` and `target_full_attn_ratio = 1 − target_ttr_ratio`.
 
@@ -95,7 +96,8 @@ For HPS/BIQA terms, the trainer compares teacher and student scores and penalize
 
 **Trainer modularization.** The `Flux2TTRControllerTrainer` node now delegates its execution flow to `flux2_ttr_controller_trainer_node.py`, with small composable helper functions for sampling, policy updates, metrics, checkpointing, and Comet logging.
 
-**Optional quality-model dependencies.** Additional controller quality terms are activated only when their weights are non-zero: `dreamsim` for DreamSim, `hpsv2` (default) or optional `ImageReward` for HPS/ImageReward, and `pyiqa` (Q-Align or LIQE fallback) for BIQA metrics.
+**Optional quality-model dependencies.** Additional controller quality terms are activated only when their weights are non-zero: `dreamsim` for DreamSim, `hpsv2` (default) or optional `ImageReward` for HPS/ImageReward, `pyiqa` (Q-Align or LIQE fallback) for BIQA metrics, and `google-genai` for Gemini pairwise image scoring.
+Gemini scoring reads the API key from `loss_config.gemini_api_key_env` (default `GEMINI_API_KEY`) and uses `loss_config.gemini_model` (default `gemini-3-flash-preview`).
 For environments using BIQA, prefer `hpsv2`; `image-reward==1.5` pins `timm==0.6.13` and can conflict with `pyiqa`.
 When DreamSim is enabled inside ComfyUI, the trainer now detects the known `from utils import trunc_normal_` namespace collision and retries import with DreamSim's bundled `utils` shim (package or single-module layouts), then falls back to a temporary `utils.trunc_normal_` patch if needed. Recovery is applied for both import-time and deferred `dreamsim(...)` call-time imports.
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import importlib.util
+import json
 import logging
 import os
 import sys
@@ -21,6 +23,17 @@ _CONTROLLER_CHECKPOINT_FORMAT = "flux2_ttr_controller_v1"
 _LPIPS_EPS = 1e-8
 DEFAULT_CONTROLLER_CHECKPOINT_EVERY = 10
 _REWARD_BASELINE_QUALITY_FLOOR_DEFAULT = -0.3
+_DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview"
+_DEFAULT_GEMINI_API_KEY_ENV = "GEMINI_API_KEY"
+_DEFAULT_GEMINI_PROMPT = (
+    "On a scale of 1 to 10, how similar is image 2 to image 1? "
+    "Respond using the `similarity` value in your output.\n"
+    "On a scale of 1 to 10, rank the relative quality of image 2 in comparison to image 1. "
+    "Respond using the `quality` value in your output.\n"
+    "Return JSON only, for example: {\"similarity\":8,\"quality\":2}."
+)
+_GEMINI_SCORE_MIN = 1.0
+_GEMINI_SCORE_MAX = 10.0
 
 
 def should_save_controller_checkpoint_step(step: int, checkpoint_every: int = DEFAULT_CONTROLLER_CHECKPOINT_EVERY) -> bool:
@@ -474,6 +487,11 @@ class ControllerTrainer:
         hps_weight: float = 0.0,
         biqa_quality_weight: float = 0.0,
         biqa_aesthetic_weight: float = 0.0,
+        gemini_similarity_weight: float = 0.0,
+        gemini_quality_weight: float = 0.0,
+        gemini_model: str = _DEFAULT_GEMINI_MODEL,
+        gemini_api_key_env: str = _DEFAULT_GEMINI_API_KEY_ENV,
+        gemini_prompt: str = _DEFAULT_GEMINI_PROMPT,
         hps_prompt: str = "",
         reward_baseline_quality_floor: float = _REWARD_BASELINE_QUALITY_FLOOR_DEFAULT,
         target_ttr_ratio: float = 0.7,
@@ -497,6 +515,11 @@ class ControllerTrainer:
             hps_weight = float(loss_cfg.get("hps_weight", hps_weight))
             biqa_quality_weight = float(loss_cfg.get("biqa_quality_weight", biqa_quality_weight))
             biqa_aesthetic_weight = float(loss_cfg.get("biqa_aesthetic_weight", biqa_aesthetic_weight))
+            gemini_similarity_weight = float(loss_cfg.get("gemini_similarity_weight", gemini_similarity_weight))
+            gemini_quality_weight = float(loss_cfg.get("gemini_quality_weight", gemini_quality_weight))
+            gemini_model = str(loss_cfg.get("gemini_model", gemini_model))
+            gemini_api_key_env = str(loss_cfg.get("gemini_api_key_env", gemini_api_key_env))
+            gemini_prompt = str(loss_cfg.get("gemini_prompt", gemini_prompt))
             hps_prompt = str(loss_cfg.get("hps_prompt", hps_prompt))
             reward_baseline_quality_floor = float(
                 loss_cfg.get(
@@ -529,6 +552,11 @@ class ControllerTrainer:
         self.hps_weight = max(0.0, float(hps_weight))
         self.biqa_quality_weight = max(0.0, float(biqa_quality_weight))
         self.biqa_aesthetic_weight = max(0.0, float(biqa_aesthetic_weight))
+        self.gemini_similarity_weight = max(0.0, float(gemini_similarity_weight))
+        self.gemini_quality_weight = max(0.0, float(gemini_quality_weight))
+        self.gemini_model = str(gemini_model or _DEFAULT_GEMINI_MODEL)
+        self.gemini_api_key_env = str(gemini_api_key_env or _DEFAULT_GEMINI_API_KEY_ENV)
+        self.gemini_prompt = str(gemini_prompt or _DEFAULT_GEMINI_PROMPT)
         self.hps_prompt = str(hps_prompt or "")
         self.reward_baseline_quality_floor = float(reward_baseline_quality_floor)
         self.target_ttr_ratio = float(target_ttr_ratio)
@@ -562,15 +590,20 @@ class ControllerTrainer:
         self.biqa_backend = ""
         self.biqa_quality_model = None
         self.biqa_aesthetic_model = None
+        self.gemini_client = None
+        self.gemini_types = None
         if self.dreamsim_weight > 0:
             self._init_dreamsim_model()
         if self.hps_weight > 0:
             self._init_hps_model()
         if self.biqa_quality_weight > 0 or self.biqa_aesthetic_weight > 0:
             self._init_biqa_models()
+        if self.gemini_similarity_weight > 0 or self.gemini_quality_weight > 0:
+            self._init_gemini_client()
         logger.info(
             (
                 "ControllerTrainer initialized: lr=%.6g rmse=%.4g cosine=%.4g lpips=%.4g dreamsim=%.4g hps=%.4g biqa_q=%.4g biqa_a=%.4g "
+                "gemini_similarity=%.4g gemini_quality=%.4g gemini_model=%s "
                 "target_ttr_ratio=%.4g target_full_attn_ratio=%.4g "
                 "lambda_eff=%.4g lambda_entropy=%.4g grad_clip=%.4g baseline_quality_floor=%.4g"
             ),
@@ -582,6 +615,9 @@ class ControllerTrainer:
             self.hps_weight,
             self.biqa_quality_weight,
             self.biqa_aesthetic_weight,
+            self.gemini_similarity_weight,
+            self.gemini_quality_weight,
+            self.gemini_model,
             self.target_ttr_ratio,
             self._target_full_attn_ratio_from_ttr_ratio(self.target_ttr_ratio),
             self.lambda_eff,
@@ -1101,6 +1137,159 @@ class ControllerTrainer:
         out = self.biqa_aesthetic_model(inp, task_="aesthetic") if self.biqa_backend == "qalign" else self.biqa_aesthetic_model(inp)
         return self._to_scalar_tensor(out, device=loss.device, dtype=loss.dtype)
 
+    def _init_gemini_client(self) -> None:
+        api_key_env = str(self.gemini_api_key_env or "").strip()
+        if not api_key_env:
+            raise RuntimeError("ControllerTrainer: Gemini scoring requires a non-empty gemini_api_key_env.")
+        api_key = str(os.environ.get(api_key_env, "")).strip()
+        if not api_key:
+            raise RuntimeError(
+                f"ControllerTrainer: Gemini scoring enabled but environment variable {api_key_env!r} is not set."
+            )
+        try:
+            from google import genai  # type: ignore
+            from google.genai import types as genai_types  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                "ControllerTrainer: Gemini weights > 0 require the 'google-genai' package."
+            ) from exc
+
+        self.gemini_client = genai.Client(api_key=api_key)
+        self.gemini_types = genai_types
+
+    @staticmethod
+    def _parse_gemini_json_scores(response_text: str) -> tuple[float, float]:
+        payload = str(response_text or "").strip()
+        if not payload:
+            raise ValueError("Gemini response is empty.")
+
+        parsed: Any
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            start = payload.find("{")
+            end = payload.rfind("}")
+            if start < 0 or end <= start:
+                raise ValueError(f"Gemini response is not valid JSON: {payload!r}") from None
+            snippet = payload[start : end + 1]
+            try:
+                parsed = json.loads(snippet)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Gemini response is not valid JSON: {payload!r}") from exc
+
+        if not isinstance(parsed, dict):
+            raise ValueError(f"Gemini response JSON must be an object: {payload!r}")
+        if "similarity" not in parsed or "quality" not in parsed:
+            raise ValueError(
+                "Gemini response JSON must include numeric keys 'similarity' and 'quality'."
+            )
+
+        try:
+            similarity = float(parsed["similarity"])
+            quality = float(parsed["quality"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Gemini response JSON keys 'similarity' and 'quality' must be numeric."
+            ) from exc
+        if not (np.isfinite(similarity) and np.isfinite(quality)):
+            raise ValueError("Gemini response values must be finite numbers.")
+
+        similarity = float(np.clip(similarity, _GEMINI_SCORE_MIN, _GEMINI_SCORE_MAX))
+        quality = float(np.clip(quality, _GEMINI_SCORE_MIN, _GEMINI_SCORE_MAX))
+        return similarity, quality
+
+    @classmethod
+    def _png_bytes_from_rgb01(cls, image_rgb_01: torch.Tensor) -> bytes:
+        pil_image = cls._tensor_to_pil(image_rgb_01)
+        buffer = io.BytesIO()
+        pil_image.save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    def _query_gemini_pair(
+        self,
+        *,
+        teacher_png: bytes,
+        student_png: bytes,
+    ) -> tuple[float, float]:
+        if self.gemini_client is None or self.gemini_types is None:
+            raise RuntimeError("Gemini scoring requested but Gemini client is not initialized.")
+        if not self.gemini_model:
+            raise RuntimeError("Gemini scoring requested but gemini_model is empty.")
+        if not self.gemini_prompt:
+            raise RuntimeError("Gemini scoring requested but gemini_prompt is empty.")
+
+        types_mod = self.gemini_types
+        contents = [
+            types_mod.Content(
+                role="user",
+                parts=[
+                    types_mod.Part.from_bytes(mime_type="image/png", data=teacher_png),
+                    types_mod.Part.from_bytes(mime_type="image/png", data=student_png),
+                    types_mod.Part.from_text(text=self.gemini_prompt),
+                ],
+            ),
+        ]
+        config = types_mod.GenerateContentConfig(response_mime_type="application/json")
+
+        chunks: list[str] = []
+        try:
+            for chunk in self.gemini_client.models.generate_content_stream(
+                model=self.gemini_model,
+                contents=contents,
+                config=config,
+            ):
+                text = getattr(chunk, "text", "")
+                if text:
+                    chunks.append(str(text))
+        except Exception as exc:
+            logger.error(
+                "ControllerTrainer: Gemini API request failed (%s: %s).",
+                type(exc).__name__,
+                exc,
+            )
+            raise RuntimeError("ControllerTrainer: Gemini API request failed.") from exc
+        response_text = "".join(chunks).strip()
+        if not response_text:
+            raise RuntimeError("ControllerTrainer: Gemini API returned an empty response.")
+        return self._parse_gemini_json_scores(response_text)
+
+    def _score_gemini_batch(
+        self,
+        *,
+        teacher_rgb_01: torch.Tensor,
+        student_rgb_01: torch.Tensor,
+        loss: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if teacher_rgb_01.shape != student_rgb_01.shape:
+            raise ValueError(
+                "ControllerTrainer._score_gemini_batch expects teacher and student RGB tensors with matching shape."
+            )
+        batch_size = int(teacher_rgb_01.shape[0])
+        if batch_size <= 0:
+            raise ValueError("ControllerTrainer._score_gemini_batch requires a non-empty batch.")
+        if batch_size > 1:
+            logger.debug("ControllerTrainer: Gemini scoring %d image pairs (one API call per pair).", batch_size)
+
+        similarity_scores: list[float] = []
+        quality_scores: list[float] = []
+        for idx in range(batch_size):
+            teacher_png = self._png_bytes_from_rgb01(teacher_rgb_01[idx])
+            student_png = self._png_bytes_from_rgb01(student_rgb_01[idx])
+            similarity, quality = self._query_gemini_pair(teacher_png=teacher_png, student_png=student_png)
+            similarity_scores.append(float(similarity))
+            quality_scores.append(float(quality))
+
+        similarity_tensor = torch.tensor(similarity_scores, device=loss.device, dtype=loss.dtype).mean()
+        quality_tensor = torch.tensor(quality_scores, device=loss.device, dtype=loss.dtype).mean()
+        return similarity_tensor, quality_tensor
+
+    @staticmethod
+    def _gemini_score_to_penalty(score: torch.Tensor) -> torch.Tensor:
+        score_min = torch.tensor(_GEMINI_SCORE_MIN, device=score.device, dtype=score.dtype)
+        score_max = torch.tensor(_GEMINI_SCORE_MAX, device=score.device, dtype=score.dtype)
+        denom = torch.clamp(score_max - score_min, min=1e-6)
+        return torch.relu((score_max - score) / denom)
+
     @staticmethod
     def _ratio_tensor(
         actual_full_attn_ratio: float | torch.Tensor,
@@ -1150,6 +1339,10 @@ class ControllerTrainer:
         biqa_aesthetic_teacher = torch.tensor(0.0, device=loss.device)
         biqa_aesthetic_student = torch.tensor(0.0, device=loss.device)
         biqa_aesthetic_penalty = torch.tensor(0.0, device=loss.device)
+        gemini_similarity = torch.tensor(0.0, device=loss.device)
+        gemini_quality = torch.tensor(0.0, device=loss.device)
+        gemini_similarity_penalty = torch.tensor(0.0, device=loss.device)
+        gemini_quality_penalty = torch.tensor(0.0, device=loss.device)
 
         needs_rgb = (
             self.lpips_weight > 0
@@ -1157,6 +1350,8 @@ class ControllerTrainer:
             or self.hps_weight > 0
             or self.biqa_quality_weight > 0
             or self.biqa_aesthetic_weight > 0
+            or self.gemini_similarity_weight > 0
+            or self.gemini_quality_weight > 0
         )
         if needs_rgb and (teacher_rgb is None or student_rgb is None):
             raise ValueError("teacher_rgb and student_rgb are required when any RGB quality weights are enabled.")
@@ -1175,7 +1370,14 @@ class ControllerTrainer:
             lpips_term = self.lpips_model(student_rgb, teacher_rgb).mean().to(device=loss.device)
             loss = loss + self.lpips_weight * lpips_term
 
-        if self.dreamsim_weight > 0 or self.hps_weight > 0 or self.biqa_quality_weight > 0 or self.biqa_aesthetic_weight > 0:
+        if (
+            self.dreamsim_weight > 0
+            or self.hps_weight > 0
+            or self.biqa_quality_weight > 0
+            or self.biqa_aesthetic_weight > 0
+            or self.gemini_similarity_weight > 0
+            or self.gemini_quality_weight > 0
+        ):
             teacher_rgb_01 = self._prep_metric_rgb(teacher_rgb)
             student_rgb_01 = self._prep_metric_rgb(student_rgb)
             if self.dreamsim_weight > 0:
@@ -1202,6 +1404,16 @@ class ControllerTrainer:
                 biqa_aesthetic_student = self._score_biqa_aesthetic(rgb_01=student_rgb_01, loss=loss)
                 biqa_aesthetic_penalty = torch.relu(biqa_aesthetic_teacher - biqa_aesthetic_student)
                 loss = loss + self.biqa_aesthetic_weight * biqa_aesthetic_penalty
+            if self.gemini_similarity_weight > 0 or self.gemini_quality_weight > 0:
+                gemini_similarity, gemini_quality = self._score_gemini_batch(
+                    teacher_rgb_01=teacher_rgb_01,
+                    student_rgb_01=student_rgb_01,
+                    loss=loss,
+                )
+                gemini_similarity_penalty = self._gemini_score_to_penalty(gemini_similarity)
+                gemini_quality_penalty = self._gemini_score_to_penalty(gemini_quality)
+                loss = loss + self.gemini_similarity_weight * gemini_similarity_penalty
+                loss = loss + self.gemini_quality_weight * gemini_quality_penalty
 
         ratio = self._ratio_tensor(
             actual_full_attn_ratio,
@@ -1230,6 +1442,10 @@ class ControllerTrainer:
             "biqa_aesthetic_teacher": float(biqa_aesthetic_teacher.detach().item()),
             "biqa_aesthetic_student": float(biqa_aesthetic_student.detach().item()),
             "biqa_aesthetic_penalty": float(biqa_aesthetic_penalty.detach().item()),
+            "gemini_similarity": float(gemini_similarity.detach().item()),
+            "gemini_quality": float(gemini_quality.detach().item()),
+            "gemini_similarity_penalty": float(gemini_similarity_penalty.detach().item()),
+            "gemini_quality_penalty": float(gemini_quality_penalty.detach().item()),
             "efficiency_penalty": float(efficiency_penalty.detach().item()),
             "actual_full_attn_ratio": actual_full_attn_ratio_value,
             "actual_ttr_ratio": float(1.0 - actual_full_attn_ratio_value),
