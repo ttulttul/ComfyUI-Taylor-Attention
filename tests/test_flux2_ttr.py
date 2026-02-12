@@ -761,6 +761,27 @@ def test_train_from_replay_rebuilds_stale_inference_layer():
     assert _has_inference_params(runtime.layers[layer_key]) is False
 
 
+def test_ensure_layer_rebuild_logs_are_debug_only(caplog):
+    runtime = flux2_ttr.Flux2TTRRuntime(
+        feature_dim=256,
+        learning_rate=1e-3,
+        training=True,
+        steps=1,
+    )
+    layer_key = "single:0"
+
+    with torch.inference_mode():
+        stale_layer = flux2_ttr.Flux2HKRAttnLayer(head_dim=4, feature_dim=256).to(device="cpu", dtype=torch.float32)
+    runtime.layers[layer_key] = stale_layer
+    runtime.optimizers[layer_key] = runtime._ensure_optimizer(stale_layer)
+
+    caplog.set_level(logging.INFO, logger="flux2_ttr")
+    runtime._ensure_layer(layer_key=layer_key, head_dim=4, device=torch.device("cpu"))
+
+    assert "Flux2TTR: detected inference tensors in layer" not in caplog.text
+    assert "Flux2TTR: created HKR layer" not in caplog.text
+
+
 def test_runtime_training_preview_uses_student_when_layer_ready():
     torch.manual_seed(0)
     runtime = flux2_ttr.Flux2TTRRuntime(

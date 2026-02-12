@@ -1773,7 +1773,7 @@ class Flux2TTRRuntime:
         if layer is not None:
             has_inference_params = any(self._is_inference_tensor(p) for p in layer.parameters())
             if has_inference_params:
-                logger.warning(
+                logger.debug(
                     "Flux2TTR: detected inference tensors in layer %s; rebuilding trainable layer/optimizer.",
                     layer_key,
                 )
@@ -1846,7 +1846,7 @@ class Flux2TTRRuntime:
             self.layers[layer_key] = layer
             self.optimizers[layer_key] = optimizer
             self.replay_buffers.setdefault(layer_key, deque())
-            logger.info(
+            logger.debug(
                 (
                     "Flux2TTR: created HKR layer %s (head_dim=%d feature_dim=%d "
                     "landmarks=fraction=%.4g min=%d max=%d)."
