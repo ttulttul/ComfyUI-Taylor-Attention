@@ -20,6 +20,42 @@ fi
 
 echo "Using virtual environment: ${VENV_DIR}"
 
+ensure_pkg_resources() {
+    if "${PYTHON_BIN}" -c "import pkg_resources" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "pkg_resources not found; attempting compatibility installs..."
+    if ! uv pip install --python "${PYTHON_BIN}" -U pkg_resources; then
+        echo "pkg_resources package unavailable; pinning setuptools<81 for bundled pkg_resources..."
+        uv pip install --python "${PYTHON_BIN}" -U "setuptools<81"
+    fi
+
+    if "${PYTHON_BIN}" -c "import pkg_resources" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "pkg_resources still unavailable; writing compatibility shim (pkg_resources -> packaging)..."
+    SITE_PACKAGES_DIR="$("${PYTHON_BIN}" - <<'PY'
+import sysconfig
+print(sysconfig.get_paths()["purelib"])
+PY
+)"
+    cat <<'PY' > "${SITE_PACKAGES_DIR}/pkg_resources.py"
+"""Compatibility shim for packages that only need `from pkg_resources import packaging`."""
+import packaging as packaging
+__all__ = ["packaging"]
+PY
+
+    if "${PYTHON_BIN}" -c "import pkg_resources; from pkg_resources import packaging" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "Error: pkg_resources is still unavailable in '${VENV_DIR}'."
+    echo "Please install setuptools/pkg_resources support in this environment and retry."
+    exit 1
+}
+
 echo "1. Creating dependency overrides for Python 3.12 and ComfyUI compatibility..."
 # This fixes the llvmlite/numba build errors on Py3.12
 # And fixes the OpenCV/Numpy 2.0 conflict
@@ -34,18 +70,7 @@ EOF
 echo "2. Installing packaging/runtime tools..."
 # Fixes 'No module named pkg_resources' from clip/pyiqa and image-reward install issues.
 uv pip install --python "${PYTHON_BIN}" -U setuptools packaging
-if ! "${PYTHON_BIN}" -c "import pkg_resources" >/dev/null 2>&1; then
-    echo "2b. pkg_resources not found; attempting to install compatibility package..."
-    if ! uv pip install --python "${PYTHON_BIN}" -U pkg_resources; then
-        echo "2c. pkg_resources package unavailable; pinning setuptools<81 for bundled pkg_resources..."
-        uv pip install --python "${PYTHON_BIN}" -U "setuptools<81"
-    fi
-fi
-if ! "${PYTHON_BIN}" -c "import pkg_resources" >/dev/null 2>&1; then
-    echo "Error: pkg_resources is still unavailable in '${VENV_DIR}'."
-    echo "Please install setuptools with pkg_resources support in this environment and retry."
-    exit 1
-fi
+ensure_pkg_resources
 
 echo "3. Resolving dependencies..."
 # Compiles the requirements into a temporary file using the overrides
@@ -58,6 +83,7 @@ uv pip compile pyproject.toml \
 
 echo "4. Installing resolved dependencies..."
 uv pip install --python "${PYTHON_BIN}" -r temp_reqs.txt
+ensure_pkg_resources
 
 echo "5. Cleaning up..."
 rm temp_overrides.txt temp_reqs.txt

@@ -142,6 +142,8 @@
 - DreamSim may defer its `from utils import trunc_normal_` dependency until `dreamsim(...)` is called, so recovery must wrap both import-time and call-time execution paths.
 - `pyiqa` can fail to import even when installed if `pkg_resources` is missing in the runtime env; ensuring `setuptools` (and `packaging`) are installed up front in `install_requirements.sh` prevents BIQA startup failures.
 - In some Python 3.12 environments, `setuptools` alone still leaves `pkg_resources` unavailable for `image-reward` metadata builds; install scripts should verify `import pkg_resources`, then auto-fallback to `pkg_resources` package or `setuptools<81`.
+- Even when `pkg_resources` exists before dependency resolution, it can disappear after final installs; re-verify after `uv pip install -r ...` and re-apply compatibility fixes.
+- A minimal `pkg_resources.py` shim exposing `packaging` is a practical last-resort compatibility fix for `clip`/`pyiqa` stacks that only import `from pkg_resources import packaging`.
 - Dependency install scripts are safer when they accept an explicit venv path and pass `--python <venv>/bin/python` to `uv pip` so installs target the intended ComfyUI runtime environment.
 - High-frequency HKR lifecycle messages (inference-tensor rebuild and layer creation) are better at `DEBUG` level; keeping them at `INFO/WARNING` causes noisy logs during normal Flux2TTR training.
 - Controller routing can ratchet toward all-TTR unless efficiency penalty is symmetric around target and reward-baseline EMA updates are quality-floor clamped; using `abs(actual_full-target_full)` with `reward_baseline_quality_floor` prevents this collapse mode.

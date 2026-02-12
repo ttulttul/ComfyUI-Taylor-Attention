@@ -13,7 +13,8 @@ For scripted installs, `install_requirements.sh` accepts an optional venv
 directory argument (for example `bash install_requirements.sh /venv/main`) and
 installs into that environment explicitly. The script also verifies
 `pkg_resources` availability for `image-reward`/`pyiqa` dependency resolution
-and applies compatibility fallbacks automatically.
+both before and after the resolved install step, and applies compatibility
+fallbacks (including a minimal `pkg_resources -> packaging` shim) automatically.
 
 ## Available Nodes
 
