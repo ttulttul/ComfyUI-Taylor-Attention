@@ -19,6 +19,8 @@ It also enforces a BIQA-compatible `timm` (with `timm.models._builder`) and
 checks `import pyiqa` before reporting success.
 `image-reward` is not installed by default because it pins an older `timm`
 that conflicts with BIQA (`pyiqa`) requirements.
+For `hpsv2`, the installer also verifies/repairs the missing tokenizer asset
+`bpe_simple_vocab_16e6.txt.gz` under `hpsv2/src/open_clip` if needed.
 
 ## Available Nodes
 

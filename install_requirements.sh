@@ -73,6 +73,66 @@ ensure_timm_builder() {
     exit 1
 }
 
+ensure_hpsv2_bpe_asset() {
+    if "${PYTHON_BIN}" - <<'PY' >/dev/null 2>&1
+import importlib.util
+from pathlib import Path
+
+spec = importlib.util.find_spec("hpsv2")
+if spec is None or not spec.submodule_search_locations:
+    raise SystemExit(0)
+pkg_dir = Path(next(iter(spec.submodule_search_locations)))
+target = pkg_dir / "src" / "open_clip" / "bpe_simple_vocab_16e6.txt.gz"
+raise SystemExit(0 if target.is_file() else 1)
+PY
+    then
+        return 0
+    fi
+
+    echo "hpsv2 tokenizer asset missing; attempting repair..."
+    if ! "${PYTHON_BIN}" - <<'PY'
+import importlib.util
+import shutil
+import sys
+import urllib.request
+from pathlib import Path
+
+spec = importlib.util.find_spec("hpsv2")
+if spec is None or not spec.submodule_search_locations:
+    print("hpsv2 not installed; skipping tokenizer asset repair.")
+    raise SystemExit(0)
+
+pkg_dir = Path(next(iter(spec.submodule_search_locations)))
+target = pkg_dir / "src" / "open_clip" / "bpe_simple_vocab_16e6.txt.gz"
+if target.is_file():
+    raise SystemExit(0)
+target.parent.mkdir(parents=True, exist_ok=True)
+
+site_packages = pkg_dir.parent
+for candidate in site_packages.rglob("bpe_simple_vocab_16e6.txt.gz"):
+    if candidate == target or not candidate.is_file():
+        continue
+    shutil.copyfile(candidate, target)
+    print(f"Installed missing hpsv2 tokenizer asset from {candidate}")
+    raise SystemExit(0)
+
+url = "https://openaipublic.blob.core.windows.net/clip/bpe_simple_vocab_16e6.txt.gz"
+try:
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        data = resp.read()
+    target.write_bytes(data)
+    print(f"Downloaded missing hpsv2 tokenizer asset to {target}")
+except Exception as exc:
+    print(f"Failed to repair hpsv2 tokenizer asset: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+    then
+        echo "Error: hpsv2 tokenizer asset is missing and could not be repaired."
+        echo "Expected file: <venv>/lib/python*/site-packages/hpsv2/src/open_clip/bpe_simple_vocab_16e6.txt.gz"
+        exit 1
+    fi
+}
+
 echo "1. Creating dependency overrides for Python 3.12 and ComfyUI compatibility..."
 # This fixes the llvmlite/numba build errors on Py3.12
 # And fixes the OpenCV/Numpy 2.0 conflict
@@ -103,6 +163,7 @@ echo "4. Installing resolved dependencies..."
 uv pip install --python "${PYTHON_BIN}" -r temp_reqs.txt
 ensure_pkg_resources
 ensure_timm_builder
+ensure_hpsv2_bpe_asset
 
 echo "4b. Verifying pyiqa import..."
 if ! "${PYTHON_BIN}" -c "import pyiqa" >/dev/null 2>&1; then

@@ -146,6 +146,7 @@
 - A minimal `pkg_resources.py` shim exposing `packaging` is a practical last-resort compatibility fix for `clip`/`pyiqa` stacks that only import `from pkg_resources import packaging`.
 - `pyiqa` can import `topiq_swin` paths that require `timm.models._builder`; enforcing `timm>=0.9.16` and verifying that symbol avoids BIQA runtime import crashes.
 - `image-reward==1.5` pins `timm==0.6.13`, which conflicts with BIQA (`pyiqa`) paths that require `timm.models._builder`; keep ImageReward out of default installs and treat it as optional.
+- Some `hpsv2` wheels miss `src/open_clip/bpe_simple_vocab_16e6.txt.gz`; install tooling should validate that asset and repair it (copy from site-packages or download) to avoid runtime `FileNotFoundError` in `hpsv2.score`.
 - Dependency install scripts are safer when they accept an explicit venv path and pass `--python <venv>/bin/python` to `uv pip` so installs target the intended ComfyUI runtime environment.
 - High-frequency HKR lifecycle messages (inference-tensor rebuild and layer creation) are better at `DEBUG` level; keeping them at `INFO/WARNING` causes noisy logs during normal Flux2TTR training.
 - Controller routing can ratchet toward all-TTR unless efficiency penalty is symmetric around target and reward-baseline EMA updates are quality-floor clamped; using `abs(actual_full-target_full)` with `reward_baseline_quality_floor` prevents this collapse mode.

@@ -1060,10 +1060,19 @@ class ControllerTrainer:
             try:
                 scores = self.hps_module.score(pil_images, prompt, hps_version=self.hps_version)
             except Exception:
-                scores = [
-                    self.hps_module.score(pil_img, prompt, hps_version=self.hps_version)
-                    for pil_img in pil_images
-                ]
+                try:
+                    scores = [
+                        self.hps_module.score(pil_img, prompt, hps_version=self.hps_version)
+                        for pil_img in pil_images
+                    ]
+                except FileNotFoundError as exc:
+                    message = str(exc)
+                    if "bpe_simple_vocab_16e6.txt.gz" in message:
+                        raise RuntimeError(
+                            "ControllerTrainer: hpsv2 is missing tokenizer asset "
+                            "'bpe_simple_vocab_16e6.txt.gz'. Re-run install_requirements.sh for this venv."
+                        ) from exc
+                    raise
             return self._scores_to_tensor(scores, device=loss.device, dtype=loss.dtype).mean()
         if self.hps_backend != "imagereward" or self.hps_model is None:
             raise RuntimeError("HPS requested but no HPS backend is initialized.")

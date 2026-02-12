@@ -713,6 +713,31 @@ def test_controller_trainer_hps_requires_dependency(monkeypatch):
         flux2_ttr_controller.ControllerTrainer(controller, hps_weight=1.0)
 
 
+def test_controller_trainer_hps_missing_bpe_asset_reports_fix(monkeypatch):
+    controller = flux2_ttr_controller.TTRController(num_layers=2, embed_dim=8, hidden_dim=16)
+    trainer = flux2_ttr_controller.ControllerTrainer(controller, hps_weight=0.0)
+
+    class _FakeHpsModule:
+        @staticmethod
+        def score(*args, **kwargs):
+            del args, kwargs
+            raise FileNotFoundError(
+                "[Errno 2] No such file or directory: "
+                "'/venv/main/lib/python3.12/site-packages/hpsv2/src/open_clip/bpe_simple_vocab_16e6.txt.gz'"
+            )
+
+    trainer.hps_backend = "hpsv2"
+    trainer.hps_module = _FakeHpsModule()
+
+    rgb = torch.zeros(1, 3, 8, 8)
+    with pytest.raises(RuntimeError, match="missing tokenizer asset"):
+        trainer._score_hps_batch(
+            rgb_01=rgb,
+            prompt="a test prompt",
+            loss=torch.tensor(0.0),
+        )
+
+
 def test_controller_trainer_biqa_requires_dependency(monkeypatch):
     monkeypatch.setitem(sys.modules, "pyiqa", None)
     controller = flux2_ttr_controller.TTRController(num_layers=2, embed_dim=8, hidden_dim=16)
