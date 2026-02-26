@@ -1,3 +1,4 @@
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -107,3 +108,89 @@ def test_comet_payload_keys_text_sorts_keys():
 
 def test_comet_payload_keys_text_empty_payload():
     assert trainer_node.comet_payload_keys_text({}) == "<empty>"
+
+
+def test_maybe_save_periodic_checkpoint_logs_comet_checkpoint_artifact(monkeypatch, tmp_path):
+    save_calls = []
+    artifact_calls = []
+
+    def _fake_save(controller, checkpoint_path, trainer=None):
+        save_calls.append((controller, checkpoint_path, trainer))
+
+    def _fake_log_artifact(experiment, checkpoint_path, *, artifact_name, step, logger, metadata=None):
+        artifact_calls.append(
+            {
+                "experiment": experiment,
+                "checkpoint_path": checkpoint_path,
+                "artifact_name": artifact_name,
+                "step": step,
+                "logger": logger,
+                "metadata": dict(metadata or {}),
+            }
+        )
+        return True
+
+    monkeypatch.setattr(trainer_node.flux2_ttr_controller, "save_controller_checkpoint", _fake_save)
+    monkeypatch.setattr(trainer_node, "safe_comet_log_checkpoint_artifact", _fake_log_artifact)
+
+    engine = trainer_node.ControllerTrainerNodeEngine.__new__(trainer_node.ControllerTrainerNodeEngine)
+    engine.logger = logging.getLogger("test_flux2_ttr_controller_trainer_node")
+    engine.config = SimpleNamespace(checkpoint_path=str(tmp_path / "controller_periodic.pt"))
+    engine.loop_state = SimpleNamespace(global_step=10)
+    engine.run_plan = SimpleNamespace(total_steps=25, checkpoint_every=10, comet_experiment=object())
+    engine.bundle = SimpleNamespace(controller=object(), trainer=object())
+
+    engine._maybe_save_periodic_checkpoint()
+
+    assert len(save_calls) == 1
+    assert save_calls[0][1] == str(tmp_path / "controller_periodic.pt")
+    assert len(artifact_calls) == 1
+    assert artifact_calls[0]["checkpoint_path"] == str(tmp_path / "controller_periodic.pt")
+    assert artifact_calls[0]["artifact_name"] == "flux2ttr-controller-checkpoint"
+    assert artifact_calls[0]["step"] == 10
+    assert artifact_calls[0]["metadata"]["phase"] == "controller_train"
+    assert artifact_calls[0]["metadata"]["save_reason"] == "periodic"
+    assert artifact_calls[0]["metadata"]["total_steps"] == 25
+
+
+def test_save_final_checkpoint_logs_comet_checkpoint_artifact(monkeypatch, tmp_path):
+    save_calls = []
+    artifact_calls = []
+
+    def _fake_save(controller, checkpoint_path, trainer=None):
+        save_calls.append((controller, checkpoint_path, trainer))
+
+    def _fake_log_artifact(experiment, checkpoint_path, *, artifact_name, step, logger, metadata=None):
+        artifact_calls.append(
+            {
+                "experiment": experiment,
+                "checkpoint_path": checkpoint_path,
+                "artifact_name": artifact_name,
+                "step": step,
+                "logger": logger,
+                "metadata": dict(metadata or {}),
+            }
+        )
+        return True
+
+    monkeypatch.setattr(trainer_node.flux2_ttr_controller, "save_controller_checkpoint", _fake_save)
+    monkeypatch.setattr(trainer_node, "safe_comet_log_checkpoint_artifact", _fake_log_artifact)
+
+    engine = trainer_node.ControllerTrainerNodeEngine.__new__(trainer_node.ControllerTrainerNodeEngine)
+    engine.logger = logging.getLogger("test_flux2_ttr_controller_trainer_node")
+    engine.config = SimpleNamespace(checkpoint_path=str(tmp_path / "controller_final.pt"))
+    engine.loop_state = SimpleNamespace(global_step=31)
+    engine.run_plan = SimpleNamespace(total_steps=31, comet_experiment=object())
+    engine.bundle = SimpleNamespace(controller=object(), trainer=object())
+
+    engine._save_final_checkpoint()
+
+    assert len(save_calls) == 1
+    assert save_calls[0][1] == str(tmp_path / "controller_final.pt")
+    assert len(artifact_calls) == 1
+    assert artifact_calls[0]["checkpoint_path"] == str(tmp_path / "controller_final.pt")
+    assert artifact_calls[0]["artifact_name"] == "flux2ttr-controller-checkpoint"
+    assert artifact_calls[0]["step"] == 31
+    assert artifact_calls[0]["metadata"]["phase"] == "controller_train"
+    assert artifact_calls[0]["metadata"]["save_reason"] == "final"
+    assert artifact_calls[0]["metadata"]["total_steps"] == 31

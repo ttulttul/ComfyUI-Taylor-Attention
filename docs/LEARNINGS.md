@@ -154,3 +154,4 @@
 - Gemini-based controller quality scoring is easiest to operationalize as a pairwise teacher/student image call that returns strict JSON (`{"similarity":8,"quality":2}`), then maps both 1-10 scores into bounded penalties before weighting them in the quality loss.
 - For UI convenience, controller training can accept `gemini_api_key` directly in `loss_config` and fall back to `gemini_api_key_env` only when inline key is empty.
 - Gemini API calls can fail transiently; controller training should soft-fail those iterations by skipping Gemini terms instead of aborting the whole Phase-2 update.
+- Comet metric streams alone are not enough for recovery workflows; uploading each Phase-1 and Phase-2 checkpoint save as a Comet `checkpoint` artifact (with step + save-reason metadata) makes resume/audit of training state much more reliable.

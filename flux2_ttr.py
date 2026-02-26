@@ -3005,6 +3005,23 @@ class Flux2TTRRuntime:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         torch.save(self.checkpoint_state(), path)
         logger.info("Flux2TTR: saved checkpoint to %s", path)
+        experiment = self._ensure_comet_experiment()
+        if experiment is None:
+            return
+        flux2_comet_logging.safe_log_checkpoint_artifact(
+            experiment=experiment,
+            checkpoint_path=path,
+            logger=logger,
+            component_name="Flux2TTR",
+            artifact_name="flux2ttr-runtime-checkpoint",
+            step=int(self.training_updates_done),
+            metadata={
+                "phase": "distill_train",
+                "training_mode": bool(self.training_mode),
+                "updates_done": int(self.training_updates_done),
+                "steps_remaining": int(self.steps_remaining),
+            },
+        )
 
     def load_checkpoint(self, checkpoint_path: str) -> None:
         path = checkpoint_path.strip()

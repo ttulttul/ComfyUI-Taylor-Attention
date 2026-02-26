@@ -356,6 +356,88 @@ def safe_log_metrics(
         return False
 
 
+def _sanitize_artifact_name(name: str, *, fallback: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(name or "").strip())
+    cleaned = cleaned.strip("._-")
+    if cleaned:
+        return cleaned
+    fallback_cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(fallback or "").strip()).strip("._-")
+    return fallback_cleaned or "checkpoint"
+
+
+def safe_log_checkpoint_artifact(
+    *,
+    experiment: Any,
+    checkpoint_path: str,
+    logger: logging.Logger,
+    component_name: str,
+    artifact_name: str,
+    step: Optional[int] = None,
+    metadata: Optional[Mapping[str, Any]] = None,
+) -> bool:
+    if experiment is None:
+        return False
+    path = str(checkpoint_path or "").strip()
+    if not path:
+        return False
+    checkpoint_file = Path(path)
+    if not checkpoint_file.is_file():
+        logger.warning(
+            "%s: Comet checkpoint artifact logging skipped; file not found: %s.",
+            component_name,
+            path,
+        )
+        return False
+
+    try:
+        from comet_ml import Artifact
+    except ImportError as exc:
+        logger.warning(
+            "%s: could not import comet_ml Artifact for checkpoint upload (%s: %s).",
+            component_name,
+            type(exc).__name__,
+            exc,
+        )
+        return False
+
+    artifact_key = _sanitize_artifact_name(artifact_name, fallback=checkpoint_file.stem)
+    metadata_payload: dict[str, Any] = dict(metadata or {})
+    metadata_payload.setdefault("checkpoint_path", str(checkpoint_file))
+    metadata_payload.setdefault("checkpoint_file", checkpoint_file.name)
+    if step is not None:
+        metadata_payload.setdefault("step", int(step))
+
+    try:
+        artifact = Artifact(
+            name=artifact_key,
+            artifact_type="checkpoint",
+            metadata=metadata_payload,
+        )
+        artifact.add(
+            str(checkpoint_file),
+            logical_path=checkpoint_file.name,
+            overwrite=True,
+            copy_to_tmp=True,
+        )
+        experiment.log_artifact(artifact)
+        logger.info(
+            "%s: logged checkpoint artifact to Comet (artifact=%s path=%s step=%s).",
+            component_name,
+            artifact_key,
+            checkpoint_file,
+            int(step) if step is not None else "n/a",
+        )
+        return True
+    except Exception as exc:
+        logger.warning(
+            "%s: Comet checkpoint artifact upload failed (%s: %s).",
+            component_name,
+            type(exc).__name__,
+            exc,
+        )
+        return False
+
+
 def should_log_step(
     *,
     step: int,

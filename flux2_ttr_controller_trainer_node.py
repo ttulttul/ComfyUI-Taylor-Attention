@@ -360,6 +360,26 @@ def safe_comet_log_metrics(
     )
 
 
+def safe_comet_log_checkpoint_artifact(
+    experiment: Any,
+    checkpoint_path: str,
+    *,
+    artifact_name: str,
+    step: int,
+    logger: logging.Logger,
+    metadata: Optional[dict[str, Any]] = None,
+) -> bool:
+    return flux2_comet_logging.safe_log_checkpoint_artifact(
+        experiment=experiment,
+        checkpoint_path=checkpoint_path,
+        logger=logger,
+        component_name="Flux2TTRControllerTrainer",
+        artifact_name=artifact_name,
+        step=int(step),
+        metadata=metadata,
+    )
+
+
 def inference_tensor_count(module: torch.nn.Module) -> int:
     count = 0
     for tensor in list(module.parameters()) + list(module.buffers()):
@@ -1426,6 +1446,19 @@ class ControllerTrainerNodeEngine:
             self.run_plan.total_steps,
             self.config.checkpoint_path,
         )
+        if self.run_plan.comet_experiment is not None:
+            safe_comet_log_checkpoint_artifact(
+                self.run_plan.comet_experiment,
+                self.config.checkpoint_path,
+                artifact_name="flux2ttr-controller-checkpoint",
+                step=self.loop_state.global_step,
+                logger=self.logger,
+                metadata={
+                    "phase": "controller_train",
+                    "save_reason": "periodic",
+                    "total_steps": int(self.run_plan.total_steps),
+                },
+            )
 
     def _maybe_log_comet_metrics(self, metrics: dict[str, float]) -> None:
         if self.run_plan.comet_experiment is None:
@@ -1539,6 +1572,19 @@ class ControllerTrainerNodeEngine:
                 self.config.checkpoint_path,
                 trainer=self.bundle.trainer,
             )
+            if self.run_plan.comet_experiment is not None:
+                safe_comet_log_checkpoint_artifact(
+                    self.run_plan.comet_experiment,
+                    self.config.checkpoint_path,
+                    artifact_name="flux2ttr-controller-checkpoint",
+                    step=self.loop_state.global_step,
+                    logger=self.logger,
+                    metadata={
+                        "phase": "controller_train",
+                        "save_reason": "final",
+                        "total_steps": int(self.run_plan.total_steps),
+                    },
+                )
 
 
 def run_controller_trainer_node(

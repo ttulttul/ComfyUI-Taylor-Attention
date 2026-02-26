@@ -145,6 +145,85 @@ def test_safe_log_metrics_returns_false_on_experiment_error():
     assert ok is False
 
 
+def test_safe_log_checkpoint_artifact_uploads_artifact(monkeypatch, tmp_path: Path):
+    init_calls = []
+    add_calls = []
+    log_calls = []
+
+    class _FakeArtifact:
+        def __init__(self, name, artifact_type=None, version=None, aliases=None, metadata=None, version_tags=None):
+            del version, aliases, version_tags
+            init_calls.append((name, artifact_type, dict(metadata or {})))
+
+        def add(self, local_path_or_data, logical_path=None, overwrite=False, copy_to_tmp=True, metadata=None):
+            add_calls.append((local_path_or_data, logical_path, overwrite, copy_to_tmp, metadata))
+
+    class _FakeExperiment:
+        def log_artifact(self, artifact):
+            log_calls.append(artifact)
+            return {"logged": True}
+
+    fake_comet = types.ModuleType("comet_ml")
+    fake_comet.Artifact = _FakeArtifact
+    monkeypatch.setitem(sys.modules, "comet_ml", fake_comet)
+
+    ckpt = tmp_path / "controller.pt"
+    ckpt.write_bytes(b"checkpoint-bytes")
+    ok = flux2_comet_logging.safe_log_checkpoint_artifact(
+        experiment=_FakeExperiment(),
+        checkpoint_path=str(ckpt),
+        logger=logging.getLogger("test_flux2_comet_logging"),
+        component_name="TestComet",
+        artifact_name="flux2ttr-controller-checkpoint",
+        step=11,
+        metadata={"save_reason": "periodic"},
+    )
+
+    assert ok is True
+    assert len(init_calls) == 1
+    assert init_calls[0][0] == "flux2ttr-controller-checkpoint"
+    assert init_calls[0][1] == "checkpoint"
+    assert init_calls[0][2]["save_reason"] == "periodic"
+    assert init_calls[0][2]["checkpoint_file"] == "controller.pt"
+    assert init_calls[0][2]["step"] == 11
+    assert len(add_calls) == 1
+    assert add_calls[0][0] == str(ckpt)
+    assert add_calls[0][1] == "controller.pt"
+    assert add_calls[0][2] is True
+    assert add_calls[0][3] is True
+    assert len(log_calls) == 1
+
+
+def test_safe_log_checkpoint_artifact_returns_false_on_log_failure(monkeypatch, tmp_path: Path):
+    class _FakeArtifact:
+        def __init__(self, name, artifact_type=None, version=None, aliases=None, metadata=None, version_tags=None):
+            del name, artifact_type, version, aliases, metadata, version_tags
+
+        def add(self, local_path_or_data, logical_path=None, overwrite=False, copy_to_tmp=True, metadata=None):
+            del local_path_or_data, logical_path, overwrite, copy_to_tmp, metadata
+
+    class _FakeExperiment:
+        def log_artifact(self, artifact):
+            del artifact
+            raise RuntimeError("upload failed")
+
+    fake_comet = types.ModuleType("comet_ml")
+    fake_comet.Artifact = _FakeArtifact
+    monkeypatch.setitem(sys.modules, "comet_ml", fake_comet)
+
+    ckpt = tmp_path / "runtime.pt"
+    ckpt.write_bytes(b"checkpoint-bytes")
+    ok = flux2_comet_logging.safe_log_checkpoint_artifact(
+        experiment=_FakeExperiment(),
+        checkpoint_path=str(ckpt),
+        logger=logging.getLogger("test_flux2_comet_logging"),
+        component_name="TestComet",
+        artifact_name="flux2ttr-runtime-checkpoint",
+        step=5,
+    )
+    assert ok is False
+
+
 def test_should_log_step_can_force_first_step():
     assert flux2_comet_logging.should_log_step(
         step=1,

@@ -146,6 +146,56 @@ def test_load_checkpoint_feature_dim_rejects_invalid_feature_dim(tmp_path):
         flux2_ttr.load_checkpoint_feature_dim(str(ckpt))
 
 
+def test_save_checkpoint_logs_comet_checkpoint_artifact(monkeypatch, tmp_path):
+    runtime = flux2_ttr.Flux2TTRRuntime(feature_dim=256, learning_rate=1e-3, training=True, steps=1)
+    runtime.training_updates_done = 17
+    runtime.steps_remaining = 3
+    fake_experiment = object()
+    monkeypatch.setattr(runtime, "_ensure_comet_experiment", lambda: fake_experiment)
+
+    calls = []
+
+    def _fake_log_checkpoint_artifact(
+        *,
+        experiment,
+        checkpoint_path,
+        logger,
+        component_name,
+        artifact_name,
+        step=None,
+        metadata=None,
+    ):
+        calls.append(
+            {
+                "experiment": experiment,
+                "checkpoint_path": checkpoint_path,
+                "logger": logger,
+                "component_name": component_name,
+                "artifact_name": artifact_name,
+                "step": step,
+                "metadata": dict(metadata or {}),
+            }
+        )
+        return True
+
+    monkeypatch.setattr(flux2_comet_logging, "safe_log_checkpoint_artifact", _fake_log_checkpoint_artifact)
+
+    ckpt = tmp_path / "flux2_ttr_runtime.pt"
+    runtime.save_checkpoint(str(ckpt))
+
+    assert ckpt.exists()
+    assert len(calls) == 1
+    assert calls[0]["experiment"] is fake_experiment
+    assert calls[0]["checkpoint_path"] == str(ckpt)
+    assert calls[0]["component_name"] == "Flux2TTR"
+    assert calls[0]["artifact_name"] == "flux2ttr-runtime-checkpoint"
+    assert calls[0]["step"] == 17
+    assert calls[0]["metadata"]["phase"] == "distill_train"
+    assert calls[0]["metadata"]["training_mode"] is True
+    assert calls[0]["metadata"]["updates_done"] == 17
+    assert calls[0]["metadata"]["steps_remaining"] == 3
+
+
 def test_runtime_checkpoint_cache_key_includes_file_identity_and_flags(tmp_path):
     flux2_ttr.clear_runtime_checkpoint_cache()
     ckpt = tmp_path / "flux2_ttr_runtime_cache.pt"
